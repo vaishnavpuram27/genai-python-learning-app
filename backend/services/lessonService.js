@@ -1,7 +1,7 @@
 import Lesson from "../models/Lesson.js";
 
-export async function listLessons() {
-  return Lesson.find().sort({ updatedAt: -1 }).lean();
+export async function listLessons(classId) {
+  return Lesson.find({ classId }).sort({ updatedAt: -1 }).lean();
 }
 
 export async function getLessonById(id) {

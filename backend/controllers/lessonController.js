@@ -5,6 +5,7 @@ import {
   listLessons,
   updateLesson,
 } from "../services/lessonService.js";
+import { getMembership } from "../services/classService.js";
 import { sendError, sendSuccess } from "../utils/responses.js";
 
 function toLessonResponse(lesson) {
@@ -18,6 +19,7 @@ function toLessonResponse(lesson) {
     question: lesson.question,
     hints: lesson.hints,
     codeStarter: lesson.codeStarter,
+    classId: lesson.classId?.toString?.() || lesson.classId,
     createdBy: lesson.createdBy,
     createdAt: lesson.createdAt,
     updatedAt: lesson.updatedAt,
@@ -25,7 +27,15 @@ function toLessonResponse(lesson) {
 }
 
 export async function getLessons(_req, res) {
-  const lessons = await listLessons();
+  const classId = _req.query.classId;
+  if (!classId) {
+    return sendError(res, "classId is required", 400, "VALIDATION_ERROR");
+  }
+  const membership = await getMembership(_req.user.id, classId);
+  if (!membership) {
+    return sendError(res, "Forbidden", 403, "FORBIDDEN");
+  }
+  const lessons = await listLessons(classId);
   return sendSuccess(res, { lessons: lessons.map(toLessonResponse) });
 }
 
@@ -33,6 +43,10 @@ export async function getLesson(req, res) {
   const lesson = await getLessonById(req.params.id);
   if (!lesson) {
     return sendError(res, "Lesson not found", 404, "NOT_FOUND");
+  }
+  const membership = await getMembership(req.user.id, lesson.classId);
+  if (!membership) {
+    return sendError(res, "Forbidden", 403, "FORBIDDEN");
   }
   return sendSuccess(res, { lesson: toLessonResponse(lesson) });
 }
@@ -43,8 +57,16 @@ export async function createLessonHandler(req, res) {
   }
 
   const payload = req.body || {};
+  if (!payload.classId) {
+    return sendError(res, "classId is required", 400, "VALIDATION_ERROR");
+  }
+  const membership = await getMembership(req.user.id, payload.classId);
+  if (!membership || membership.role !== "teacher") {
+    return sendError(res, "Forbidden", 403, "FORBIDDEN");
+  }
   try {
     const lesson = await createLesson({
+      classId: payload.classId,
       unit: payload.unit,
       heading: payload.heading,
       duration: payload.duration,
@@ -67,6 +89,14 @@ export async function updateLessonHandler(req, res) {
   }
 
   const payload = req.body || {};
+  const existing = await getLessonById(req.params.id);
+  if (!existing) {
+    return sendError(res, "Lesson not found", 404, "NOT_FOUND");
+  }
+  const membership = await getMembership(req.user.id, existing.classId);
+  if (!membership || membership.role !== "teacher") {
+    return sendError(res, "Forbidden", 403, "FORBIDDEN");
+  }
   const update = {
     unit: payload.unit,
     heading: payload.heading,
@@ -79,9 +109,6 @@ export async function updateLessonHandler(req, res) {
   };
 
   const lesson = await updateLesson(req.params.id, update);
-  if (!lesson) {
-    return sendError(res, "Lesson not found", 404, "NOT_FOUND");
-  }
   return sendSuccess(res, { lesson: toLessonResponse(lesson) });
 }
 
@@ -90,9 +117,14 @@ export async function deleteLessonHandler(req, res) {
     return sendError(res, "Only teachers can delete lessons", 403, "FORBIDDEN");
   }
 
-  const lesson = await deleteLesson(req.params.id);
-  if (!lesson) {
+  const existing = await getLessonById(req.params.id);
+  if (!existing) {
     return sendError(res, "Lesson not found", 404, "NOT_FOUND");
   }
+  const membership = await getMembership(req.user.id, existing.classId);
+  if (!membership || membership.role !== "teacher") {
+    return sendError(res, "Forbidden", 403, "FORBIDDEN");
+  }
+  const lesson = await deleteLesson(req.params.id);
   return sendSuccess(res, { success: true });
 }

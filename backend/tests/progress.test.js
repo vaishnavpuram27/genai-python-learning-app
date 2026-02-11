@@ -8,11 +8,20 @@ async function signup(role = "teacher") {
   return res.body.data.token;
 }
 
-async function createLesson(token) {
+async function createClass(token) {
+  const res = await request(app)
+    .post("/api/v1/classes")
+    .set("Authorization", `Bearer ${token}`)
+    .send({ name: "Intro Class" });
+  return res.body.data.classroom.id;
+}
+
+async function createLesson(token, classId) {
   const res = await request(app)
     .post("/api/v1/lessons")
     .set("Authorization", `Bearer ${token}`)
     .send({
+      classId,
       unit: "Basics",
       heading: "Intro",
       duration: "5 min",
@@ -29,7 +38,8 @@ describe("Progress API", () => {
   it("lets a student update and fetch progress", async () => {
     const teacherToken = await signup("teacher");
     const studentToken = await signup("student");
-    const lessonId = await createLesson(teacherToken);
+    const classId = await createClass(teacherToken);
+    const lessonId = await createLesson(teacherToken, classId);
 
     const updateRes = await request(app)
       .put(`/api/v1/progress/${lessonId}`)

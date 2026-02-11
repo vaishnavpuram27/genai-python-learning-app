@@ -8,14 +8,24 @@ async function signup(role = "teacher") {
   return res.body.data.token;
 }
 
+async function createClass(token) {
+  const res = await request(app)
+    .post("/api/v1/classes")
+    .set("Authorization", `Bearer ${token}`)
+    .send({ name: "Intro Class" });
+  return res.body.data.classroom.id;
+}
+
 describe("Lessons API", () => {
   it("allows a teacher to create and fetch lessons", async () => {
     const token = await signup("teacher");
+    const classId = await createClass(token);
 
     const createRes = await request(app)
       .post("/api/v1/lessons")
       .set("Authorization", `Bearer ${token}`)
       .send({
+        classId,
         unit: "Basics",
         heading: "Intro",
         duration: "5 min",
@@ -31,7 +41,7 @@ describe("Lessons API", () => {
     expect(createRes.body.data.lesson.id).toBeTruthy();
 
     const listRes = await request(app)
-      .get("/api/v1/lessons")
+      .get(`/api/v1/lessons?classId=${classId}`)
       .set("Authorization", `Bearer ${token}`);
 
     expect(listRes.status).toBe(200);
@@ -53,6 +63,7 @@ describe("Lessons API", () => {
       .post("/api/v1/lessons")
       .set("Authorization", `Bearer ${token}`)
       .send({
+        classId: "507f1f77bcf86cd799439011",
         unit: "Basics",
         heading: "Intro",
         duration: "5 min",

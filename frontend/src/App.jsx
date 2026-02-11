@@ -33,6 +33,34 @@ function mapLessonFromApi(lesson) {
   return { ...lesson, id: id ? id.toString() : createLessonId() };
 }
 
+function mapClassFromApi(classroom) {
+  if (!classroom) return null;
+  const id = classroom.id || classroom._id;
+  return { ...classroom, id: id ? id.toString() : "" };
+}
+
+function parseRoute() {
+  const path = window.location.pathname || "/";
+  const studentMatch = path.match(/^\/classes\/([a-f\d]{24})\/students\/([a-f\d]{24})$/i);
+  if (studentMatch) {
+    return {
+      page: "student",
+      classId: studentMatch[1],
+      studentId: studentMatch[2],
+      lessonId: null,
+    };
+  }
+  const lessonMatch = path.match(/^\/classes\/([a-f\d]{24})\/lessons\/([a-f\d]{24})$/i);
+  if (lessonMatch) {
+    return { page: "lesson", classId: lessonMatch[1], lessonId: lessonMatch[2], studentId: null };
+  }
+  const classMatch = path.match(/^\/classes\/([a-f\d]{24})$/i);
+  if (classMatch) {
+    return { page: "class", classId: classMatch[1], lessonId: null, studentId: null };
+  }
+  return { page: "classes", classId: null, lessonId: null, studentId: null };
+}
+
 function authHeaders() {
   const token = localStorage.getItem(AUTH_TOKEN_KEY);
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -52,13 +80,25 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
   const [viewRole, setViewRole] = useState("student");
+  const [route, setRoute] = useState(() => parseRoute());
 
   const [lessons, setLessons] = useState([]);
   const [activeLessonId, setActiveLessonId] = useState(null);
-  const [teacherPage, setTeacherPage] = useState("workspace");
-  const [studentPage, setStudentPage] = useState("dashboard");
   const [toast, setToast] = useState(null);
   const [progress, setProgress] = useState(null);
+  const [classes, setClasses] = useState([]);
+  const [activeClassId, setActiveClassId] = useState(null);
+  const [className, setClassName] = useState("");
+  const [joinCode, setJoinCode] = useState("");
+  const [classError, setClassError] = useState("");
+  const [classNotice, setClassNotice] = useState("");
+  const [classStudents, setClassStudents] = useState([]);
+  const [studentsRefreshKey, setStudentsRefreshKey] = useState(0);
+  const [selectedStudentId, setSelectedStudentId] = useState(null);
+  const [selectedStudentName, setSelectedStudentName] = useState("");
+  const [studentProgress, setStudentProgress] = useState([]);
+  const [studentProgressError, setStudentProgressError] = useState("");
+  const [studentProgressLoading, setStudentProgressLoading] = useState(false);
 
 
   const editorRef = useRef(null);
@@ -71,12 +111,139 @@ export default function App() {
     );
   }, [lessons, activeLessonId]);
 
+  const activeClass = useMemo(() => {
+    return classes.find((item) => item.id === activeClassId) || classes[0] || null;
+  }, [classes, activeClassId]);
+
   const [lessonJson, setLessonJson] = useState(
     JSON.stringify(lesson, null, 2)
   );
 
   const codeStarterRef = useRef(lesson.codeStarter);
 
+  const isClassRoute = route.page === "class" || route.page === "lesson";
+  const isLessonRoute = route.page === "lesson";
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setRoute(parseRoute());
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+
+    async function fetchClasses() {
+      try {
+        const res = await fetch(`${API_BASE}/classes`, {
+          headers: { ...authHeaders() },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const apiClasses = data?.data?.classes;
+        if (!apiClasses || cancelled) return;
+        const mapped = apiClasses.map(mapClassFromApi);
+        setClasses(mapped);
+        if (route.page === "class") {
+          const exists = mapped.some((item) => item.id === route.classId);
+          if (!exists) {
+            setClassError("Class not found.");
+            navigateToClasses();
+          }
+        }
+      } catch {
+        // Ignore class loading errors for now.
+      }
+    }
+
+    fetchClasses();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || !activeClassId || route.page !== "class") {
+      setClassStudents([]);
+      return;
+    }
+    if (user.role !== "teacher") {
+      setClassStudents([]);
+      return;
+    }
+    let cancelled = false;
+
+    async function fetchStudents() {
+      try {
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/students`, {
+          headers: { ...authHeaders() },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        setClassStudents(data?.data?.students || []);
+      } catch {
+        // Ignore student list errors.
+      }
+    }
+
+    fetchStudents();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, activeClassId, route.page, studentsRefreshKey]);
+
+  useEffect(() => {
+    if (!user || !activeClassId || route.page !== "student" || !route.studentId) {
+      setSelectedStudentName("");
+      setStudentProgress([]);
+      setStudentProgressError("");
+      setStudentProgressLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setStudentProgressError("");
+    setStudentProgressLoading(true);
+
+    async function fetchStudentProgress() {
+      try {
+        const res = await fetch(
+          `${API_BASE}/classes/${activeClassId}/students/${route.studentId}/progress`,
+          { headers: { ...authHeaders() } }
+        );
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok) {
+          setStudentProgressError(data?.error?.message || "Unable to load progress.");
+          setStudentProgress([]);
+          return;
+        }
+        setStudentProgress(data?.data?.progress || []);
+        const fromApi = data?.data?.student?.name;
+        if (fromApi) {
+          setSelectedStudentName(fromApi);
+        } else {
+          const student = classStudents.find((item) => item.id === route.studentId);
+          setSelectedStudentName(student?.name || "Student");
+        }
+      } catch {
+        if (cancelled) return;
+        setStudentProgressError("Unable to load progress.");
+        setStudentProgress([]);
+      } finally {
+        if (!cancelled) setStudentProgressLoading(false);
+      }
+    }
+
+    fetchStudentProgress();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, activeClassId, route.page, route.studentId, classStudents]);
 
   useEffect(() => {
     if (!user) return;
@@ -84,16 +251,28 @@ export default function App() {
 
     async function fetchLessons() {
       try {
-        const res = await fetch(`${API_BASE}/lessons`, {
+        if (!activeClassId) {
+          setLessons([]);
+          setActiveLessonId(null);
+          return;
+        }
+        const res = await fetch(`${API_BASE}/lessons?classId=${activeClassId}`, {
           headers: { ...authHeaders() },
         });
         if (!res.ok) return;
         const data = await res.json();
         const apiLessons = data?.data?.lessons;
-        if (!apiLessons?.length || cancelled) return;
-        const mapped = apiLessons.map(mapLessonFromApi);
+        if (cancelled) return;
+        const mapped = Array.isArray(apiLessons)
+          ? apiLessons.map(mapLessonFromApi)
+          : [];
         setLessons(mapped);
-        setActiveLessonId(mapped[0].id);
+        if (route.page === "lesson") {
+          setActiveLessonId((prev) => {
+            if (prev && mapped.some((item) => item.id === prev)) return prev;
+            return mapped[0]?.id || null;
+          });
+        }
       } catch {
         // Fall back to localStorage when the API or DB is not ready yet.
       }
@@ -103,7 +282,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [user, activeClassId, route.page]);
 
   useEffect(() => {
     setLessonJson(JSON.stringify(lesson, null, 2));
@@ -114,7 +293,31 @@ export default function App() {
   }, [activeLessonId]);
 
   useEffect(() => {
-    if (!user || !activeLessonId || !isMongoObjectId(activeLessonId)) {
+    if (route.page === "class") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(null);
+      setSelectedStudentId(null);
+      setSelectedStudentName("");
+      setStudentProgress([]);
+      return;
+    }
+    if (route.page === "lesson") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(route.lessonId);
+      return;
+    }
+    if (route.page === "student") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(null);
+      setSelectedStudentId(route.studentId);
+      return;
+    }
+    setActiveClassId(null);
+    setActiveLessonId(null);
+  }, [route]);
+
+  useEffect(() => {
+    if (!isLessonRoute || !user || !activeLessonId || !isMongoObjectId(activeLessonId)) {
       setProgress(null);
       return;
     }
@@ -150,13 +353,9 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     if (user.role === "teacher") {
-      setTeacherPage("dashboard");
       setViewRole("teacher");
-      setStudentPage("dashboard");
     } else {
-      setTeacherPage("workspace");
       setViewRole("student");
-      setStudentPage("dashboard");
     }
   }, [user]);
 
@@ -183,9 +382,7 @@ export default function App() {
 
   useEffect(() => {
     if (!user) return;
-    const isTeacher = user.role === "teacher";
-    if (isTeacher && teacherPage !== "workspace") return;
-    if (!isTeacher && studentPage !== "workspace") return;
+    if (!isLessonRoute || !activeClassId) return;
     let editor;
     let currentTheme = "vs-dark";
     let fallbackTimer;
@@ -195,11 +392,14 @@ export default function App() {
     const runBtn = document.getElementById("run-btn");
     const themeBtn = document.getElementById("theme-toggle");
     const editorHost = document.getElementById("editor");
-
     if (!outputEl || !runBtn || !themeBtn || !editorHost) return;
 
+    function appendText(text) {
+      outputEl.appendChild(document.createTextNode(text));
+    }
+
     function outf(text) {
-      outputEl.textContent += text;
+      appendText(text);
     }
 
     function builtinRead(x) {
@@ -210,6 +410,53 @@ export default function App() {
         throw new Error(`File not found: '${x}'`);
       }
       return window.Sk.builtinFiles.files[x];
+    }
+
+    let inputResolve = null;
+
+    let activeInput = null;
+
+    function clearInlineInput() {
+      if (activeInput) {
+        activeInput.remove();
+        activeInput = null;
+      }
+      inputResolve = null;
+    }
+
+    function submitInlineInput(span) {
+      if (!inputResolve || !span) return;
+      const value = span.textContent || "";
+      span.remove();
+      activeInput = null;
+      appendText(`${value}\n`);
+      const resolve = inputResolve;
+      inputResolve = null;
+      resolve(value);
+    }
+
+    function requestInput(promptText = "") {
+      if (promptText) {
+        outf(promptText);
+      }
+      clearInlineInput();
+      const span = document.createElement("span");
+      span.className = "console-inline-input";
+      span.contentEditable = "true";
+      span.spellcheck = false;
+      span.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          submitInlineInput(span);
+        }
+      });
+      outputEl.appendChild(span);
+      outputEl.scrollTop = outputEl.scrollHeight;
+      span.focus();
+      activeInput = span;
+      return new Promise((resolve) => {
+        inputResolve = resolve;
+      });
     }
 
     function runCode() {
@@ -230,12 +477,18 @@ export default function App() {
         outputEl.textContent = "Editor has no code loaded yet.";
         return;
       }
+      clearInlineInput();
       persistProgress(code);
       if (window.Sk?.builtin?.dict) {
         window.Sk.sysmodules = new window.Sk.builtin.dict([]);
       }
       window.Sk.globals = {};
-      window.Sk.configure({ output: outf, read: builtinRead });
+      window.Sk.configure({
+        output: outf,
+        read: builtinRead,
+        inputfun: (promptText) => requestInput(promptText),
+        inputfunTakesPrompt: true,
+      });
       window.Sk.misceval
         .asyncToPromise(() =>
           window.Sk.importMainWithBody("<stdin>", false, code, true)
@@ -246,7 +499,8 @@ export default function App() {
           }
         })
         .catch((err) => {
-          outputEl.textContent += `\nError: ${err.toString()}`;
+          appendText(`\nError: ${err.toString()}`);
+          clearInlineInput();
         });
     }
 
@@ -414,7 +668,7 @@ export default function App() {
       }
       editor?.dispose();
     };
-  }, [user, teacherPage, studentPage, viewRole]);
+  }, [user, isLessonRoute, viewRole, activeClassId, route.page]);
 
   useEffect(() => {
     codeStarterRef.current = lesson.codeStarter;
@@ -433,18 +687,186 @@ export default function App() {
     );
   }
 
-  function handleSelectLesson(id, nextPage = "workspace") {
-    setActiveLessonId(id);
-    setTeacherPage(nextPage);
-    setStudentPage(nextPage);
+  function navigateToClasses() {
+    window.history.pushState({}, "", "/classes");
+    setRoute({ page: "classes", classId: null, lessonId: null });
+  }
+
+  function navigateToClass(id) {
+    window.history.pushState({}, "", `/classes/${id}`);
+    setRoute({ page: "class", classId: id, lessonId: null });
+  }
+
+  function navigateToLesson(classId, lessonId) {
+    window.history.pushState({}, "", `/classes/${classId}/lessons/${lessonId}`);
+    setRoute({ page: "lesson", classId, lessonId });
+  }
+
+  function navigateToStudent(classId, studentId) {
+    window.history.pushState({}, "", `/classes/${classId}/students/${studentId}`);
+    setRoute({ page: "student", classId, studentId, lessonId: null });
+  }
+
+  function handleSelectLesson(id) {
+    if (!activeClassId) return;
+    navigateToLesson(activeClassId, id);
     if (user?.role === "teacher") {
       setViewRole("teacher");
     }
   }
 
+  function handleSelectClass(id) {
+    if (user?.role === "teacher") {
+      setViewRole("teacher");
+    }
+    navigateToClass(id);
+  }
+
+  async function handleCreateClass() {
+    setClassError("");
+    setClassNotice("");
+    if (!className.trim()) {
+      setClassError("Enter a class name.");
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/classes`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({ name: className.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setClassError(data?.error?.message || "Unable to create class.");
+        return;
+      }
+      const created = mapClassFromApi(data?.data?.classroom);
+      if (created) {
+        setClasses((prev) => [created, ...prev]);
+        setClassNotice(`Class created. Join code: ${created.joinCode}`);
+        setClassName("");
+        navigateToClass(created.id);
+      }
+    } catch {
+      setClassError("Class server not reachable.");
+    }
+  }
+
+  async function handleJoinClass() {
+    setClassError("");
+    setClassNotice("");
+    if (!joinCode.trim()) {
+      setClassError("Enter a join code.");
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/classes/join`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({ joinCode: joinCode.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setClassError(data?.error?.message || "Unable to join class.");
+        return;
+      }
+      const joined = mapClassFromApi(data?.data?.classroom);
+      if (joined) {
+        setClasses((prev) => {
+          if (prev.some((item) => item.id === joined.id)) return prev;
+          return [joined, ...prev];
+        });
+        setClassNotice("Class joined.");
+        setJoinCode("");
+        navigateToClass(joined.id);
+      }
+    } catch {
+      setClassError("Class server not reachable.");
+    }
+  }
+
+  async function handleDeleteClass() {
+    if (!activeClassId) return;
+    if (!window.confirm("Delete this class and all its lessons?")) return;
+    setClassError("");
+    setClassNotice("");
+    try {
+      const res = await fetch(`${API_BASE}/classes/${activeClassId}`, {
+        method: "DELETE",
+        headers: { ...authHeaders() },
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setClassError(data?.error?.message || "Unable to delete class.");
+        return;
+      }
+      setClasses((prev) => prev.filter((item) => item.id !== activeClassId));
+      setLessons([]);
+      setActiveLessonId(null);
+      navigateToClasses();
+    } catch {
+      setClassError("Class server not reachable.");
+    }
+  }
+
+  async function handleDeleteLesson(lessonId) {
+    if (!lessonId) return;
+    if (!window.confirm("Delete this lesson?")) return;
+    if (!isMongoObjectId(lessonId)) {
+      setLessons((prev) => {
+        const next = prev.filter((item) => item.id !== lessonId);
+        if (activeLessonId === lessonId) {
+          setActiveLessonId(next[0]?.id || null);
+        }
+        return next;
+      });
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/lessons/${lessonId}`, {
+        method: "DELETE",
+        headers: { ...authHeaders() },
+      });
+      if (!res.ok) {
+        setToast({ type: "error", message: "Lesson delete failed" });
+        return;
+      }
+      setLessons((prev) => {
+        const next = prev.filter((item) => item.id !== lessonId);
+        if (activeLessonId === lessonId) {
+          setActiveLessonId(next[0]?.id || null);
+        }
+        return next;
+      });
+    } catch {
+      setToast({ type: "error", message: "Lesson delete failed" });
+    }
+  }
+
+  function handleRefreshStudents() {
+    setStudentsRefreshKey((prev) => prev + 1);
+  }
+
+  function handleSelectStudent(student) {
+    if (!activeClassId || !student?.id) return;
+    setSelectedStudentName(student.name || "Student");
+    navigateToStudent(activeClassId, student.id);
+  }
+
   function handleAddLesson() {
+    if (!activeClassId) {
+      setClassError("Select a class before creating lessons.");
+      return;
+    }
     const newLesson = {
       id: createLessonId(),
+      classId: activeClassId,
       ...initialLesson,
       unit: "New Unit",
       heading: "New Lesson",
@@ -459,19 +881,24 @@ export default function App() {
             "Content-Type": "application/json",
             ...authHeaders(),
           },
-          body: JSON.stringify(newLesson),
+          body: JSON.stringify({ ...newLesson, classId: activeClassId }),
         });
         if (!res.ok) throw new Error("create_failed");
         const data = await res.json();
         const created = mapLessonFromApi(data?.data?.lesson);
         if (!created) throw new Error("create_failed");
         setLessons((prev) => [created, ...prev]);
-        setActiveLessonId(created.id);
+        if (route.page === "lesson") {
+          setActiveLessonId(created.id);
+          navigateToLesson(activeClassId, created.id);
+        }
       } catch {
         setLessons((prev) => [newLesson, ...prev]);
-        setActiveLessonId(newLesson.id);
+        if (route.page === "lesson") {
+          setActiveLessonId(newLesson.id);
+          navigateToLesson(activeClassId, newLesson.id);
+        }
       } finally {
-        setTeacherPage("workspace");
         setViewRole("teacher");
       }
     }
@@ -515,6 +942,9 @@ export default function App() {
       localStorage.setItem(AUTH_TOKEN_KEY, data.data.token);
       setUser(data.data.user);
       setViewRole(data.data.user.role);
+      if (route.page === "classes") {
+        window.history.replaceState({}, "", "/classes");
+      }
     } catch {
       setAuthError("Server not reachable.");
     }
@@ -523,12 +953,19 @@ export default function App() {
   function handleLogout() {
     localStorage.removeItem(AUTH_TOKEN_KEY);
     setUser(null);
-    setTeacherPage("workspace");
     setViewRole("student");
     setAuthNotice("You have been logged out.");
     setLoginName("");
     setLoginPassword("");
     setLoginConfirmPassword("");
+    setClasses([]);
+    setActiveClassId(null);
+    setClassError("");
+    setClassNotice("");
+    setJoinCode("");
+    setClassName("");
+    window.history.replaceState({}, "", "/classes");
+    setRoute({ page: "classes", classId: null });
   }
 
   async function persistProgress(code) {
@@ -584,6 +1021,10 @@ export default function App() {
   function handleSaveJson() {
     setLessonJson(JSON.stringify(lesson, null, 2));
     if (!user || user.role !== "teacher") return;
+    if (!activeClassId) {
+      setClassError("Select a class before saving lessons.");
+      return;
+    }
 
     const { id: lessonId, _id: _ignoredMongoId, createdBy: _ignoredCreatedBy, ...payload } = lesson;
 
@@ -596,7 +1037,7 @@ export default function App() {
               "Content-Type": "application/json",
               ...authHeaders(),
             },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({ ...payload, classId: activeClassId }),
           });
           if (!res.ok) return;
           const data = await res.json();
@@ -633,6 +1074,10 @@ export default function App() {
       updateActiveLesson(mergedLesson);
 
       if (user?.role === "teacher") {
+        if (!activeClassId) {
+          setClassError("Select a class before saving lessons.");
+          return;
+        }
         const { id: lessonId, _id: _ignoredMongoId, ...payload } = mergedLesson;
         fetch(`${API_BASE}/lessons/${lessonId}`, {
           method: "PUT",
@@ -755,18 +1200,17 @@ export default function App() {
   const isTeacher = user.role === "teacher";
   const isTeacherView = viewRole === "teacher";
 
-  if (isTeacher && teacherPage === "dashboard") {
+  if (route.page === "classes") {
     return (
-      <main className="teacher-dashboard">
+      <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
         <header className="teacher-topbar">
           <div>
-            <p className="teacher-eyebrow">Teacher Workspace</p>
-            <h1>Lessons</h1>
+            <p className="teacher-eyebrow">
+              {isTeacher ? "Teacher Workspace" : "Student Workspace"}
+            </p>
+            <h1>Classes</h1>
           </div>
           <div className="teacher-actions">
-            <button className="accent-button" type="button" onClick={handleAddLesson}>
-              Add lesson
-            </button>
             <span className="user-pill">{user.name}</span>
             <span className="role-pill">{user.role}</span>
             <button className="ghost-button" type="button" onClick={handleLogout}>
@@ -775,53 +1219,95 @@ export default function App() {
           </div>
         </header>
 
-        <section className="teacher-content">
-          <div className="teacher-summary">
-            <div className="teacher-stat">
-              <p>Total lessons</p>
-              <strong>{lessons.length}</strong>
-            </div>
-            <div className="teacher-stat">
-              <p>Last edited</p>
-              <strong>{lesson.heading}</strong>
+        <section className="class-section">
+          <div className="class-header">
+            <h2>Your classes</h2>
+            <div className="class-actions">
+              {isTeacher ? (
+                <>
+                  <input
+                    className="class-input"
+                    type="text"
+                    value={className}
+                    onChange={(event) => setClassName(event.target.value)}
+                    placeholder="Class name"
+                  />
+                  <button className="accent-button" type="button" onClick={handleCreateClass}>
+                    Create class
+                  </button>
+                </>
+              ) : (
+                <>
+                  <input
+                    className="class-input"
+                    type="text"
+                    value={joinCode}
+                    onChange={(event) => setJoinCode(event.target.value)}
+                    placeholder="Join code"
+                  />
+                  <button className="accent-button" type="button" onClick={handleJoinClass}>
+                    Join class
+                  </button>
+                </>
+              )}
             </div>
           </div>
-
-          <div className="lesson-grid">
-            {lessons.map((item) => (
-              <article key={item.id} className="lesson-card">
-                <div className="lesson-card-head">
-                  <p className="lesson-card-unit">{item.unit}</p>
-                  <span className="lesson-card-duration">{item.duration}</span>
-                </div>
-                <h3>{item.heading}</h3>
-                <p className="lesson-card-body">{item.body}</p>
-                <div className="lesson-card-actions">
-                  <button
-                    className="ghost-button"
-                    type="button"
-                    onClick={() => handleSelectLesson(item.id, "workspace")}
-                  >
-                    Edit lesson
-                  </button>
-                </div>
-              </article>
+          {classError && <p className="auth-error">{classError}</p>}
+          {classNotice && <p className="auth-notice">{classNotice}</p>}
+          <div className="class-grid">
+            {classes.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className="class-pill"
+                onClick={() => handleSelectClass(item.id)}
+              >
+                <span>{item.name}</span>
+                <small>{isTeacher ? `Join code: ${item.joinCode}` : "Joined"}</small>
+              </button>
             ))}
+            {!classes.length && (
+              <p className="empty-state">
+                {isTeacher
+                  ? "Create a class to start adding lessons."
+                  : "Join a class to see lessons."}
+              </p>
+            )}
           </div>
         </section>
       </main>
     );
   }
 
-  if (!isTeacher && studentPage === "dashboard") {
+  if (route.page === "class") {
     return (
-      <main className="student-dashboard">
+      <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
         <header className="teacher-topbar">
           <div>
-            <p className="teacher-eyebrow">Student Workspace</p>
-            <h1>Lessons</h1>
+            <p className="teacher-eyebrow">
+              {isTeacher ? "Teacher Workspace" : "Student Workspace"}
+            </p>
+            <h1>{activeClass ? activeClass.name : "Class"}</h1>
+            {activeClass && (
+              <p className="class-subtitle">
+                {isTeacher ? `Join code: ${activeClass.joinCode}` : "Lessons overview"}
+              </p>
+            )}
           </div>
           <div className="teacher-actions">
+            <button className="ghost-button" type="button" onClick={navigateToClasses}>
+              Back to Classes
+            </button>
+            {isTeacher && (
+              <button className="accent-button" type="button" onClick={handleAddLesson}>
+                Add lesson
+              </button>
+            )}
+            {isTeacher && activeClass && (
+              <button className="ghost-button" type="button" onClick={handleDeleteClass}>
+                Delete class
+              </button>
+            )}
             <span className="user-pill">{user.name}</span>
             <span className="role-pill">{user.role}</span>
             <button className="ghost-button" type="button" onClick={handleLogout}>
@@ -830,39 +1316,144 @@ export default function App() {
           </div>
         </header>
 
-        <section className="teacher-content">
-          <div className="teacher-summary">
-            <div className="teacher-stat">
-              <p>Total lessons</p>
-              <strong>{lessons.length}</strong>
-            </div>
-            <div className="teacher-stat">
-              <p>Last accessed</p>
-              <strong>{lesson.heading}</strong>
+        <section className="class-detail-grid">
+          <div className="class-detail-panel">
+            <h2>Lessons</h2>
+            {lessons.length === 0 && (
+              <p className="empty-state">No lessons yet for this class.</p>
+            )}
+            <div className="lesson-grid">
+              {lessons.map((item) => (
+                <article key={item.id} className="lesson-card">
+                  <div className="lesson-card-head">
+                    <p className="lesson-card-unit">{item.unit}</p>
+                    <span className="lesson-card-duration">{item.duration}</span>
+                  </div>
+                  <h3>{item.heading}</h3>
+                  <p className="lesson-card-body">{item.body}</p>
+                  <div className="lesson-card-actions">
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => handleSelectLesson(item.id)}
+                    >
+                      Open lesson
+                    </button>
+                    {isTeacher && (
+                      <button
+                        className="ghost-button danger"
+                        type="button"
+                        onClick={() => handleDeleteLesson(item.id)}
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                </article>
+              ))}
             </div>
           </div>
 
-          <div className="lesson-grid">
-            {lessons.map((item) => (
-              <article key={item.id} className="lesson-card">
-                <div className="lesson-card-head">
-                  <p className="lesson-card-unit">{item.unit}</p>
-                  <span className="lesson-card-duration">{item.duration}</span>
-                </div>
-                <h3>{item.heading}</h3>
-                <p className="lesson-card-body">{item.body}</p>
-                <div className="lesson-card-actions">
+          {isTeacher && (
+            <div className="class-detail-panel student-panel">
+              <div className="panel-header">
+                <h2>Students</h2>
+                <button className="ghost-button" type="button" onClick={handleRefreshStudents}>
+                  Refresh
+                </button>
+              </div>
+              {classStudents.length === 0 && (
+                <p className="empty-state">No students enrolled yet.</p>
+              )}
+              <div className="student-list">
+                {classStudents.map((student) => (
                   <button
-                    className="ghost-button"
+                    key={student.id}
                     type="button"
-                    onClick={() => handleSelectLesson(item.id, "workspace")}
+                    className={
+                      student.id === selectedStudentId
+                        ? "student-row selected"
+                        : "student-row"
+                    }
+                    onClick={() => handleSelectStudent(student)}
                   >
-                    Start lesson
+                    <span className="student-avatar">
+                      {student.name?.trim?.()[0]?.toUpperCase?.() || "?"}
+                    </span>
+                    <span className="student-name">{student.name}</span>
                   </button>
-                </div>
-              </article>
-            ))}
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+      </main>
+    );
+  }
+
+  if (route.page === "student") {
+    return (
+      <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
+        <header className="teacher-topbar">
+          <div>
+            <p className="teacher-eyebrow">Teacher Workspace</p>
+            <h1>{selectedStudentName || "Student"} progress</h1>
+            {activeClass && (
+              <p className="class-subtitle">Class: {activeClass.name}</p>
+            )}
           </div>
+          <div className="teacher-actions">
+            <button className="ghost-button" type="button" onClick={() => navigateToClass(activeClassId)}>
+              Back to Class
+            </button>
+            <button className="ghost-button" type="button" onClick={navigateToClasses}>
+              Back to Classes
+            </button>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() =>
+                activeClassId && route.studentId
+                  ? navigateToStudent(activeClassId, route.studentId)
+                  : null
+              }
+            >
+              Refresh
+            </button>
+            <span className="user-pill">{user.name}</span>
+            <span className="role-pill">{user.role}</span>
+            <button className="ghost-button" type="button" onClick={handleLogout}>
+              Log out
+            </button>
+          </div>
+        </header>
+
+        <section className="class-detail-panel">
+          {studentProgressLoading && (
+            <p className="empty-state">Loading progress…</p>
+          )}
+          {studentProgressError && (
+            <p className="auth-error">{studentProgressError}</p>
+          )}
+          {!studentProgressLoading &&
+            !studentProgressError &&
+            (studentProgress.length ? (
+              <div className="progress-list">
+                {studentProgress.map((item) => (
+                  <div key={item.lessonId} className="progress-row">
+                    <div>
+                      <p className="progress-title">{item.heading}</p>
+                      <p className="progress-meta">{item.unit} · {item.duration}</p>
+                    </div>
+                    <div className={`progress-status status-${item.status}`}>
+                      {item.status.replace("_", " ")}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="empty-state">No progress yet.</p>
+            ))}
         </section>
       </main>
     );
@@ -878,26 +1469,25 @@ export default function App() {
           <span className="brand-icon">P</span>
           <div>
             <p className="brand-label">{lesson.unit}</p>
-            <p className="brand-subtitle">Python Playground</p>
+            <p className="brand-subtitle">
+              {activeClass ? `Class: ${activeClass.name}` : "No class selected"}
+            </p>
           </div>
         </div>
         <div className="topbar-actions">
-          {!isTeacher && (
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={() => setStudentPage("dashboard")}
-            >
-              Lessons
-            </button>
-          )}
-          {isTeacher && (
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={() => setTeacherPage("dashboard")}
-            >
-              Lessons
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => (activeClassId ? navigateToClass(activeClassId) : navigateToClasses())}
+          >
+            Back to Class
+          </button>
+          <button className="ghost-button" type="button" onClick={navigateToClasses}>
+            Back to Classes
+          </button>
+          {isTeacher && activeClass && (
+            <button className="ghost-button" type="button" onClick={handleDeleteClass}>
+              Delete class
             </button>
           )}
           {isTeacher && (
@@ -921,24 +1511,53 @@ export default function App() {
 
       <section className="workspace-grid">
         <aside className="panel lesson-panel">
+          <div className="class-summary">
+            <p className="class-summary-title">Class</p>
+            <strong>{activeClass ? activeClass.name : "Select a class"}</strong>
+            {isTeacher && activeClass && (
+              <span className="class-summary-code">
+                Join code: {activeClass.joinCode}
+              </span>
+            )}
+          </div>
           <div className="lesson-list">
             <p className="lesson-list-title">Lessons</p>
             <div className="lesson-list-items">
-              {lessons.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={
-                    item.id === activeLessonId
-                      ? "lesson-list-item active"
-                      : "lesson-list-item"
-                  }
-                  onClick={() => handleSelectLesson(item.id, "workspace")}
-                >
-                  <span>{item.heading}</span>
-                  <small>{item.duration}</small>
-                </button>
-              ))}
+              {!activeClassId && (
+                <p className="empty-state">Select a class to see lessons.</p>
+              )}
+              {activeClassId && lessons.length === 0 && (
+                <p className="empty-state">No lessons yet for this class.</p>
+              )}
+              {activeClassId &&
+                lessons.map((item) => (
+                  <div
+                    key={item.id}
+                    className={
+                      item.id === activeLessonId
+                        ? "lesson-list-row active"
+                        : "lesson-list-row"
+                    }
+                  >
+                    <button
+                      type="button"
+                      className="lesson-list-item"
+                      onClick={() => handleSelectLesson(item.id)}
+                    >
+                      <span>{item.heading}</span>
+                      <small>{item.duration}</small>
+                    </button>
+                    {isTeacher && (
+                      <button
+                        type="button"
+                        className="ghost-button danger"
+                        onClick={() => handleDeleteLesson(item.id)}
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                ))}
             </div>
           </div>
           <div className="lesson-header">

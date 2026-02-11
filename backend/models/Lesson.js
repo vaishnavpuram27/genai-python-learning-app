@@ -2,6 +2,11 @@ import mongoose from "mongoose";
 
 const lessonSchema = new mongoose.Schema(
   {
+    classId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Classroom",
+      required: true,
+    },
     unit: { type: String, required: true },
     heading: { type: String, required: true },
     duration: { type: String, required: true },
