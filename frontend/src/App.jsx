@@ -27,11 +27,35 @@ function createLessonId() {
   return `lesson-${Date.now()}`;
 }
 
+function createTopicItemDraft(overrides = {}) {
+  return {
+    title: "",
+    type: "learning",
+    quizSubtype: "mcq",
+    quizQuestion: "",
+    quizOptions: [],
+    quizOptionInput: "",
+    quizOptionEditIndex: -1,
+    quizAnswer: "",
+    ...overrides,
+  };
+}
+
+function upsertOption(options, index, value) {
+  const next = [...(Array.isArray(options) ? options : [])];
+  if (index >= 0 && index < next.length) {
+    next[index] = value;
+  } else {
+    next.push(value);
+  }
+  return next.filter(Boolean);
+}
+
 function mapLessonFromApi(lesson) {
   if (!lesson) return null;
   const id = lesson.id || lesson._id;
   return { ...lesson, id: id ? id.toString() : createLessonId() };
-}
+} 
 
 function mapClassFromApi(classroom) {
   if (!classroom) return null;
@@ -41,6 +65,26 @@ function mapClassFromApi(classroom) {
 
 function parseRoute() {
   const path = window.location.pathname || "/";
+  const quizMatch = path.match(/^\/classes\/([a-f\d]{24})\/quiz\/([a-f\d]{24})$/i);
+  if (quizMatch) {
+    return {
+      page: "quiz",
+      classId: quizMatch[1],
+      itemId: quizMatch[2],
+      lessonId: null,
+      studentId: null,
+    };
+  }
+  const practiceMatch = path.match(/^\/classes\/([a-f\d]{24})\/practice\/([a-f\d]{24})$/i);
+  if (practiceMatch) {
+    return {
+      page: "practice",
+      classId: practiceMatch[1],
+      itemId: practiceMatch[2],
+      lessonId: null,
+      studentId: null,
+    };
+  }
   const studentMatch = path.match(/^\/classes\/([a-f\d]{24})\/students\/([a-f\d]{24})$/i);
   if (studentMatch) {
     return {
@@ -70,6 +114,10 @@ function isMongoObjectId(value) {
   return typeof value === "string" && /^[a-f\d]{24}$/i.test(value);
 }
 
+function PageShell({ className, children }) {
+  return <div className={className}>{children}</div>;
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [authMode, setAuthMode] = useState("login");
@@ -97,8 +145,41 @@ export default function App() {
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const [selectedStudentName, setSelectedStudentName] = useState("");
   const [studentProgress, setStudentProgress] = useState([]);
+  const [studentQuizAttempts, setStudentQuizAttempts] = useState([]);
   const [studentProgressError, setStudentProgressError] = useState("");
   const [studentProgressLoading, setStudentProgressLoading] = useState(false);
+  const [selectedProgress, setSelectedProgress] = useState(null);
+  const [selectedQuizAttempt, setSelectedQuizAttempt] = useState(null);
+  const [quizGradeFeedback, setQuizGradeFeedback] = useState("");
+  const [quizGrading, setQuizGrading] = useState(false);
+  const [topics, setTopics] = useState([]);
+  const [topicTitle, setTopicTitle] = useState("");
+  const [topicError, setTopicError] = useState("");
+  const [topicItemDrafts, setTopicItemDrafts] = useState({});
+  const [editingTopicId, setEditingTopicId] = useState(null);
+  const [editingTopicTitle, setEditingTopicTitle] = useState("");
+  const [editingItemId, setEditingItemId] = useState(null);
+  const [editingItemTitle, setEditingItemTitle] = useState("");
+  const [editingItemType, setEditingItemType] = useState("learning");
+  const [editingItemQuizSubtype, setEditingItemQuizSubtype] = useState("mcq");
+  const [editingItemQuizQuestion, setEditingItemQuizQuestion] = useState("");
+  const [editingItemQuizOptions, setEditingItemQuizOptions] = useState([]);
+  const [editingItemQuizOptionInput, setEditingItemQuizOptionInput] = useState("");
+  const [editingItemQuizOptionEditIndex, setEditingItemQuizOptionEditIndex] = useState(-1);
+  const [editingItemQuizAnswer, setEditingItemQuizAnswer] = useState("");
+  const [practiceMeta, setPracticeMeta] = useState(null);
+  const [practiceError, setPracticeError] = useState("");
+  const [quizMeta, setQuizMeta] = useState(null);
+  const [quizError, setQuizError] = useState("");
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [quizResponse, setQuizResponse] = useState("");
+  const [quizAttempt, setQuizAttempt] = useState(null);
+  const [quizSubmitting, setQuizSubmitting] = useState(false);
+  const [pageTransition, setPageTransition] = useState("page-enter");
+  const [practiceDraft, setPracticeDraft] = useState(() => ({
+    id: createLessonId(),
+    ...initialLesson,
+  }));
 
 
   const editorRef = useRef(null);
@@ -106,10 +187,15 @@ export default function App() {
   const fallbackLessonRef = useRef({ id: createLessonId(), ...initialLesson });
 
   const lesson = useMemo(() => {
+    if (route.page === "practice") {
+      return practiceDraft;
+    }
     return (
-      lessons.find((item) => item.id === activeLessonId) || lessons[0] || fallbackLessonRef.current
+      lessons.find((item) => item.id === activeLessonId) ||
+      lessons[0] ||
+      fallbackLessonRef.current
     );
-  }, [lessons, activeLessonId]);
+  }, [lessons, activeLessonId, route.page, practiceDraft]);
 
   const activeClass = useMemo(() => {
     return classes.find((item) => item.id === activeClassId) || classes[0] || null;
@@ -121,8 +207,21 @@ export default function App() {
 
   const codeStarterRef = useRef(lesson.codeStarter);
 
-  const isClassRoute = route.page === "class" || route.page === "lesson";
-  const isLessonRoute = route.page === "lesson";
+  const isClassRoute =
+    route.page === "class" ||
+    route.page === "lesson" ||
+    route.page === "practice" ||
+    route.page === "quiz";
+  const isLessonRoute = route.page === "lesson" || route.page === "practice";
+
+  useEffect(() => {
+    setPageTransition("page-enter");
+    const id = requestAnimationFrame(() =>
+      setPageTransition("page-enter page-enter-active")
+    );
+    return () => cancelAnimationFrame(id);
+  }, [route.page, route.classId, route.lessonId, route.studentId]);
+
 
   useEffect(() => {
     const handlePopState = () => {
@@ -198,11 +297,40 @@ export default function App() {
   }, [user, activeClassId, route.page, studentsRefreshKey]);
 
   useEffect(() => {
+    if (!user || !activeClassId || route.page !== "class") {
+      setTopics([]);
+      return;
+    }
+    let cancelled = false;
+
+    async function fetchTopics() {
+      try {
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
+          headers: { ...authHeaders() },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        setTopics(data?.data?.topics || []);
+      } catch {
+        // Ignore topic loading errors for now.
+      }
+    }
+
+    fetchTopics();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, activeClassId, route.page]);
+
+  useEffect(() => {
     if (!user || !activeClassId || route.page !== "student" || !route.studentId) {
       setSelectedStudentName("");
       setStudentProgress([]);
+      setStudentQuizAttempts([]);
       setStudentProgressError("");
       setStudentProgressLoading(false);
+      setSelectedQuizAttempt(null);
       return;
     }
     let cancelled = false;
@@ -220,9 +348,13 @@ export default function App() {
         if (!res.ok) {
           setStudentProgressError(data?.error?.message || "Unable to load progress.");
           setStudentProgress([]);
+          setStudentQuizAttempts([]);
           return;
         }
         setStudentProgress(data?.data?.progress || []);
+        setStudentQuizAttempts(data?.data?.quizAttempts || []);
+        setSelectedProgress(null);
+        setSelectedQuizAttempt(null);
         const fromApi = data?.data?.student?.name;
         if (fromApi) {
           setSelectedStudentName(fromApi);
@@ -234,6 +366,7 @@ export default function App() {
         if (cancelled) return;
         setStudentProgressError("Unable to load progress.");
         setStudentProgress([]);
+        setStudentQuizAttempts([]);
       } finally {
         if (!cancelled) setStudentProgressLoading(false);
       }
@@ -289,6 +422,15 @@ export default function App() {
   }, [lesson]);
 
   useEffect(() => {
+    if (route.page !== "practice" || !practiceMeta) return;
+    setPracticeDraft((prev) => ({
+      ...prev,
+      unit: practiceMeta.topicTitle || "Practice",
+      heading: practiceMeta.itemTitle || "Practice Item",
+    }));
+  }, [route.page, practiceMeta]);
+
+  useEffect(() => {
     activeLessonIdRef.current = activeLessonId;
   }, [activeLessonId]);
 
@@ -299,6 +441,7 @@ export default function App() {
       setSelectedStudentId(null);
       setSelectedStudentName("");
       setStudentProgress([]);
+      setTopicError("");
       return;
     }
     if (route.page === "lesson") {
@@ -306,10 +449,21 @@ export default function App() {
       setActiveLessonId(route.lessonId);
       return;
     }
+    if (route.page === "practice") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(null);
+      return;
+    }
+    if (route.page === "quiz") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(null);
+      return;
+    }
     if (route.page === "student") {
       setActiveClassId(route.classId);
       setActiveLessonId(null);
       setSelectedStudentId(route.studentId);
+      setSelectedProgress(null);
       return;
     }
     setActiveClassId(null);
@@ -349,6 +503,92 @@ export default function App() {
       cancelled = true;
     };
   }, [user, activeLessonId]);
+
+  useEffect(() => {
+    if (!user || route.page !== "practice" || !route.itemId || !activeClassId) {
+      setPracticeMeta(null);
+      setPracticeError("");
+      return;
+    }
+    let cancelled = false;
+
+    async function fetchPractice() {
+      try {
+        const res = await fetch(
+          `${API_BASE}/classes/${activeClassId}/practice/${route.itemId}`,
+          { headers: { ...authHeaders() } }
+        );
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok) {
+          setPracticeError(data?.error?.message || "Unable to load practice.");
+          setPracticeMeta(null);
+          return;
+        }
+        setPracticeMeta({
+          itemTitle: data?.data?.item?.title || "Practice Item",
+          topicTitle: data?.data?.item?.topic?.title || "Practice",
+        });
+      } catch {
+        if (cancelled) return;
+        setPracticeError("Unable to load practice.");
+        setPracticeMeta(null);
+      }
+    }
+
+    fetchPractice();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, route.page, route.itemId, activeClassId]);
+
+  useEffect(() => {
+    if (!user || route.page !== "quiz" || !route.itemId || !activeClassId) {
+      setQuizMeta(null);
+      setQuizError("");
+      setQuizAttempt(null);
+      setQuizResponse("");
+      setQuizLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setQuizLoading(true);
+    setQuizError("");
+
+    async function fetchQuiz() {
+      try {
+        const res = await fetch(
+          `${API_BASE}/classes/${activeClassId}/quiz/${route.itemId}`,
+          { headers: { ...authHeaders() } }
+        );
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok) {
+          setQuizError(data?.error?.message || "Unable to load quiz.");
+          setQuizMeta(null);
+          setQuizAttempt(null);
+          return;
+        }
+        const item = data?.data?.item || null;
+        const attempt = data?.data?.attempt || null;
+        setQuizMeta(item);
+        setQuizAttempt(attempt);
+        setQuizResponse(attempt?.responseText || "");
+      } catch {
+        if (cancelled) return;
+        setQuizError("Unable to load quiz.");
+        setQuizMeta(null);
+        setQuizAttempt(null);
+      } finally {
+        if (!cancelled) setQuizLoading(false);
+      }
+    }
+
+    fetchQuiz();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, route.page, route.itemId, activeClassId]);
 
   useEffect(() => {
     if (!user) return;
@@ -678,6 +918,12 @@ export default function App() {
   }, [lesson.codeStarter, viewRole]);
 
   function updateActiveLesson(updater) {
+    if (route.page === "practice") {
+      setPracticeDraft((prev) =>
+        typeof updater === "function" ? updater(prev) : { ...prev, ...updater }
+      );
+      return;
+    }
     setLessons((prev) =>
       prev.map((item) => {
         if (item.id !== activeLessonId) return item;
@@ -689,22 +935,32 @@ export default function App() {
 
   function navigateToClasses() {
     window.history.pushState({}, "", "/classes");
-    setRoute({ page: "classes", classId: null, lessonId: null });
+    setRoute({ page: "classes", classId: null, lessonId: null, itemId: null, studentId: null });
   }
 
   function navigateToClass(id) {
     window.history.pushState({}, "", `/classes/${id}`);
-    setRoute({ page: "class", classId: id, lessonId: null });
+    setRoute({ page: "class", classId: id, lessonId: null, itemId: null, studentId: null });
   }
 
   function navigateToLesson(classId, lessonId) {
     window.history.pushState({}, "", `/classes/${classId}/lessons/${lessonId}`);
-    setRoute({ page: "lesson", classId, lessonId });
+    setRoute({ page: "lesson", classId, lessonId, itemId: null, studentId: null });
   }
 
   function navigateToStudent(classId, studentId) {
     window.history.pushState({}, "", `/classes/${classId}/students/${studentId}`);
     setRoute({ page: "student", classId, studentId, lessonId: null });
+  }
+
+  function navigateToPractice(classId, itemId) {
+    window.history.pushState({}, "", `/classes/${classId}/practice/${itemId}`);
+    setRoute({ page: "practice", classId, itemId, lessonId: null, studentId: null });
+  }
+
+  function navigateToQuiz(classId, itemId) {
+    window.history.pushState({}, "", `/classes/${classId}/quiz/${itemId}`);
+    setRoute({ page: "quiz", classId, itemId, lessonId: null, studentId: null });
   }
 
   function handleSelectLesson(id) {
@@ -851,6 +1107,305 @@ export default function App() {
 
   function handleRefreshStudents() {
     setStudentsRefreshKey((prev) => prev + 1);
+  }
+
+  async function handleCreateTopic() {
+    if (!activeClassId) return;
+    setTopicError("");
+    if (!topicTitle.trim()) {
+      setTopicError("Enter a topic title.");
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({ title: topicTitle.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTopicError(data?.error?.message || "Unable to create topic.");
+        return;
+      }
+      const created = data?.data?.topic;
+      if (created) {
+        setTopics((prev) => [created, ...prev]);
+        setTopicTitle("");
+      }
+    } catch {
+      setTopicError("Topic server not reachable.");
+    }
+  }
+
+  function updateTopicDraft(topicId, updater) {
+    setTopicItemDrafts((prev) => {
+      const current = prev[topicId] || createTopicItemDraft();
+      const next = typeof updater === "function" ? updater(current) : { ...current, ...updater };
+      return { ...prev, [topicId]: next };
+    });
+  }
+
+  async function handleCreateTopicItem(topicId) {
+    if (!activeClassId || !topicId) return;
+    const draft = topicItemDrafts[topicId] || createTopicItemDraft();
+    if (!draft.title.trim()) {
+      setTopicError("Enter a title for the topic item.");
+      return;
+    }
+    if (draft.type === "quiz" && !draft.quizQuestion.trim()) {
+      setTopicError("Enter a quiz question.");
+      return;
+    }
+    if (
+      draft.type === "quiz" &&
+      draft.quizSubtype === "mcq" &&
+      (draft.quizOptions || []).length < 2
+    ) {
+      setTopicError("MCQ needs at least two options.");
+      return;
+    }
+    if (draft.type === "quiz" && !draft.quizAnswer.trim()) {
+      setTopicError("Set the expected answer.");
+      return;
+    }
+    setTopicError("");
+    const payload = {
+      title: draft.title.trim(),
+      type: draft.type,
+    };
+    if (draft.type === "quiz") {
+      payload.quizSubtype = draft.quizSubtype;
+      payload.quizQuestion = draft.quizQuestion.trim();
+      payload.quizOptions = draft.quizSubtype === "mcq" ? (draft.quizOptions || []) : [];
+      payload.quizAnswer = draft.quizAnswer.trim();
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders(),
+          },
+          body: JSON.stringify(payload),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setTopicError(data?.error?.message || "Unable to add item.");
+        return;
+      }
+      const created = data?.data?.item;
+      if (created) {
+        setTopics((prev) =>
+          prev.map((topic) =>
+            topic.id === topicId
+              ? {
+                  ...topic,
+                  items: [...(topic.items || []), created].sort(
+                    (a, b) =>
+                      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+                  ),
+                }
+              : topic
+          )
+        );
+        updateTopicDraft(topicId, createTopicItemDraft({ type: draft.type }));
+      }
+    } catch {
+      setTopicError("Topic item server not reachable.");
+    }
+  }
+
+  function beginEditTopic(topic) {
+    setEditingTopicId(topic.id);
+    setEditingTopicTitle(topic.title);
+  }
+
+  async function saveEditTopic(topicId) {
+    if (!activeClassId || !topicId) return;
+    if (!editingTopicTitle.trim()) {
+      setTopicError("Topic title is required.");
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics/${topicId}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({ title: editingTopicTitle.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTopicError(data?.error?.message || "Unable to update topic.");
+        return;
+      }
+      const updated = data?.data?.topic;
+      if (updated) {
+        setTopics((prev) =>
+          prev.map((topic) =>
+            topic.id === topicId ? { ...topic, title: updated.title } : topic
+          )
+        );
+      }
+      setEditingTopicId(null);
+      setEditingTopicTitle("");
+      setTopicError("");
+    } catch {
+      setTopicError("Topic server not reachable.");
+    }
+  }
+
+  async function deleteTopic(topicId) {
+    if (!activeClassId || !topicId) return;
+    const warn =
+      classStudents.length > 0
+        ? "Students are enrolled. Deleting this topic will remove it for all students. Continue?"
+        : "Delete this topic?";
+    if (!window.confirm(warn)) return;
+    try {
+      const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics/${topicId}`, {
+        method: "DELETE",
+        headers: { ...authHeaders() },
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setTopicError(data?.error?.message || "Unable to delete topic.");
+        return;
+      }
+      setTopics((prev) => prev.filter((topic) => topic.id !== topicId));
+    } catch {
+      setTopicError("Topic server not reachable.");
+    }
+  }
+
+  function beginEditItem(item) {
+    setEditingItemId(item.id);
+    setEditingItemTitle(item.title);
+    setEditingItemType(item.type);
+    setEditingItemQuizSubtype(item.quizSubtype || "mcq");
+    setEditingItemQuizQuestion(item.quizQuestion || "");
+    setEditingItemQuizOptions(Array.isArray(item.quizOptions) ? item.quizOptions : []);
+    setEditingItemQuizOptionInput("");
+    setEditingItemQuizOptionEditIndex(-1);
+    setEditingItemQuizAnswer(item.quizAnswer || "");
+  }
+
+  async function saveEditItem(topicId, itemId) {
+    if (!activeClassId || !topicId || !itemId) return;
+    if (!editingItemTitle.trim()) {
+      setTopicError("Item title is required.");
+      return;
+    }
+    if (editingItemType === "quiz" && !editingItemQuizQuestion.trim()) {
+      setTopicError("Quiz question is required.");
+      return;
+    }
+    if (
+      editingItemType === "quiz" &&
+      editingItemQuizSubtype === "mcq" &&
+      editingItemQuizOptions.length < 2
+    ) {
+      setTopicError("MCQ needs at least two options.");
+      return;
+    }
+    if (editingItemType === "quiz" && !editingItemQuizAnswer.trim()) {
+      setTopicError("Set the expected answer.");
+      return;
+    }
+    const payload = {
+      title: editingItemTitle.trim(),
+      type: editingItemType,
+    };
+    if (editingItemType === "quiz") {
+      payload.quizSubtype = editingItemQuizSubtype;
+      payload.quizQuestion = editingItemQuizQuestion.trim();
+      payload.quizOptions = editingItemQuizSubtype === "mcq" ? editingItemQuizOptions : [];
+      payload.quizAnswer = editingItemQuizAnswer.trim();
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items/${itemId}`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders(),
+          },
+          body: JSON.stringify(payload),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setTopicError(data?.error?.message || "Unable to update item.");
+        return;
+      }
+      const updated = data?.data?.item;
+      if (updated) {
+        setTopics((prev) =>
+          prev.map((topic) =>
+            topic.id === topicId
+              ? {
+                  ...topic,
+                  items: (topic.items || []).map((item) =>
+                    item.id === itemId ? { ...item, ...updated } : item
+                  ),
+                }
+              : topic
+          )
+        );
+      }
+      setEditingItemId(null);
+      setEditingItemTitle("");
+      setEditingItemType("learning");
+      setEditingItemQuizSubtype("mcq");
+      setEditingItemQuizQuestion("");
+      setEditingItemQuizOptions([]);
+      setEditingItemQuizOptionInput("");
+      setEditingItemQuizOptionEditIndex(-1);
+      setEditingItemQuizAnswer("");
+      setTopicError("");
+    } catch {
+      setTopicError("Item server not reachable.");
+    }
+  }
+
+  async function deleteItem(topicId, itemId) {
+    if (!activeClassId || !topicId || !itemId) return;
+    const warn =
+      classStudents.length > 0
+        ? "Students are enrolled. Deleting this item will remove it for all students. Continue?"
+        : "Delete this item?";
+    if (!window.confirm(warn)) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items/${itemId}`,
+        {
+          method: "DELETE",
+          headers: { ...authHeaders() },
+        }
+      );
+      if (!res.ok) {
+        const data = await res.json();
+        setTopicError(data?.error?.message || "Unable to delete item.");
+        return;
+      }
+      setTopics((prev) =>
+        prev.map((topic) =>
+          topic.id === topicId
+            ? { ...topic, items: (topic.items || []).filter((item) => item.id !== itemId) }
+            : topic
+        )
+      );
+    } catch {
+      setTopicError("Item server not reachable.");
+    }
   }
 
   function handleSelectStudent(student) {
@@ -1012,6 +1567,79 @@ export default function App() {
     }
   }
 
+  async function submitQuiz() {
+    if (!user || !activeClassId || !route.itemId || route.page !== "quiz") return;
+    if (!quizResponse.trim()) {
+      setQuizError("Enter your answer before submitting.");
+      return;
+    }
+
+    setQuizSubmitting(true);
+    setQuizError("");
+    try {
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/quiz/${route.itemId}/attempt`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders(),
+          },
+          body: JSON.stringify({ responseText: quizResponse.trim() }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setQuizError(data?.error?.message || "Unable to submit quiz.");
+        return;
+      }
+      setQuizAttempt(data?.data?.attempt || null);
+      setToast({ type: "success", message: "Quiz submitted" });
+    } catch {
+      setQuizError("Unable to submit quiz.");
+    } finally {
+      setQuizSubmitting(false);
+    }
+  }
+
+  async function gradeSelectedQuizAttempt(isCorrect) {
+    if (!activeClassId || !route.studentId || !selectedQuizAttempt) return;
+    setQuizGrading(true);
+    setStudentProgressError("");
+    try {
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/students/${route.studentId}/quiz-attempts/${selectedQuizAttempt.id}/grade`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders(),
+          },
+          body: JSON.stringify({
+            isCorrect,
+            feedback: quizGradeFeedback.trim(),
+          }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setStudentProgressError(data?.error?.message || "Unable to grade quiz attempt.");
+        return;
+      }
+      const updated = data?.data?.attempt;
+      if (!updated) return;
+      setStudentQuizAttempts((prev) =>
+        prev.map((item) => (item.id === updated.id ? { ...item, ...updated } : item))
+      );
+      setSelectedQuizAttempt((prev) => (prev ? { ...prev, ...updated } : prev));
+      setToast({ type: "success", message: "Quiz graded" });
+    } catch {
+      setStudentProgressError("Unable to grade quiz attempt.");
+    } finally {
+      setQuizGrading(false);
+    }
+  }
+
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 2200);
@@ -1019,6 +1647,10 @@ export default function App() {
   }, [toast]);
 
   function handleSaveJson() {
+    if (route.page === "practice") {
+      setLessonJson(JSON.stringify(lesson, null, 2));
+      return;
+    }
     setLessonJson(JSON.stringify(lesson, null, 2));
     if (!user || user.role !== "teacher") return;
     if (!activeClassId) {
@@ -1067,6 +1699,16 @@ export default function App() {
   }
 
   function handleLoadJson() {
+    if (route.page === "practice") {
+      try {
+        const parsed = JSON.parse(lessonJson);
+        const { id: _ignoredId, ...rest } = parsed;
+        setPracticeDraft((prev) => ({ ...prev, ...rest }));
+      } catch {
+        alert("Invalid JSON. Fix errors and try again.");
+      }
+      return;
+    }
     try {
       const parsed = JSON.parse(lessonJson);
       const { id: _ignoredId, ...rest } = parsed;
@@ -1095,105 +1737,107 @@ export default function App() {
 
   if (!user) {
     return (
-      <main className="login-shell">
-        <section className="login-split">
-          <div className="login-hero">
-            <p className="login-tag">Python Learning Studio</p>
-            <h1>Teach and learn Python with live practice.</h1>
-            <p className="login-copy">
-              Teachers craft lessons, hints, and starter code. Students run
-              Python instantly and get feedback in one workspace.
-            </p>
-            <div className="login-highlights">
-              <div>
-                <h3>Teacher tools</h3>
-                <p>Edit headings, instructions, and hints in seconds.</p>
-              </div>
-              <div>
-                <h3>Student focus</h3>
-                <p>Distraction-free editor and console output.</p>
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className="login-shell">
+          <section className="login-split">
+            <div className="login-hero">
+              <p className="login-tag">Python Learning Studio</p>
+              <h1>Teach and learn Python with live practice.</h1>
+              <p className="login-copy">
+                Teachers craft lessons, hints, and starter code. Students run
+                Python instantly and get feedback in one workspace.
+              </p>
+              <div className="login-highlights">
+                <div>
+                  <h3>Teacher tools</h3>
+                  <p>Edit headings, instructions, and hints in seconds.</p>
+                </div>
+                <div>
+                  <h3>Student focus</h3>
+                  <p>Distraction-free editor and console output.</p>
+                </div>
               </div>
             </div>
-          </div>
-          <form className="login-card" onSubmit={handleAuth}>
-            <div className="auth-tabs">
-              <button
-                type="button"
-                className={authMode === "login" ? "active" : ""}
-                onClick={() => setAuthMode("login")}
-              >
-                Log in
-              </button>
-              <button
-                type="button"
-                className={authMode === "signup" ? "active" : ""}
-                onClick={() => setAuthMode("signup")}
-              >
-                Sign up
-              </button>
-            </div>
-            <h2>{authMode === "login" ? "Welcome back" : "Create account"}</h2>
-            <p>
-              {authMode === "login"
-                ? "Sign in to enter your classroom."
-                : "Create a new student or teacher account."}
-            </p>
-            <label className="login-field">
-              Full name
-              <input
-                type="text"
-                value={loginName}
-                onChange={(event) => setLoginName(event.target.value)}
-                placeholder="Alex Kim"
-              />
-            </label>
-            <label className="login-field">
-              Password
-              <input
-                type="password"
-                value={loginPassword}
-                onChange={(event) => setLoginPassword(event.target.value)}
-                placeholder="........"
-              />
-            </label>
-            {authMode === "signup" && (
+            <form className="login-card" onSubmit={handleAuth}>
+              <div className="auth-tabs">
+                <button
+                  type="button"
+                  className={authMode === "login" ? "active" : ""}
+                  onClick={() => setAuthMode("login")}
+                >
+                  Log in
+                </button>
+                <button
+                  type="button"
+                  className={authMode === "signup" ? "active" : ""}
+                  onClick={() => setAuthMode("signup")}
+                >
+                  Sign up
+                </button>
+              </div>
+              <h2>{authMode === "login" ? "Welcome back" : "Create account"}</h2>
+              <p>
+                {authMode === "login"
+                  ? "Sign in to enter your classroom."
+                  : "Create a new student or teacher account."}
+              </p>
               <label className="login-field">
-                Confirm password
+                Full name
+                <input
+                  type="text"
+                  value={loginName}
+                  onChange={(event) => setLoginName(event.target.value)}
+                  placeholder="Alex Kim"
+                />
+              </label>
+              <label className="login-field">
+                Password
                 <input
                   type="password"
-                  value={loginConfirmPassword}
-                  onChange={(event) =>
-                    setLoginConfirmPassword(event.target.value)
-                  }
+                  value={loginPassword}
+                  onChange={(event) => setLoginPassword(event.target.value)}
                   placeholder="........"
                 />
               </label>
-            )}
-            {authMode === "signup" && (
-              <label className="login-field">
-                Role
-                <select
-                  value={loginRole}
-                  onChange={(event) => setLoginRole(event.target.value)}
-                >
-                  <option value="student">Student</option>
-                  <option value="teacher">Teacher</option>
-                </select>
-              </label>
-            )}
-            {authError && <p className="auth-error">{authError}</p>}
-            {authNotice && <p className="auth-notice">{authNotice}</p>}
-            <button className="accent-button login-button" type="submit">
-              {authMode === "login" ? "Enter Workspace" : "Create Account"}
-            </button>
-            {authMode === "login" && (
-              <button type="button" className="forgot-link">
-                Forgot password?
+              {authMode === "signup" && (
+                <label className="login-field">
+                  Confirm password
+                  <input
+                    type="password"
+                    value={loginConfirmPassword}
+                    onChange={(event) =>
+                      setLoginConfirmPassword(event.target.value)
+                    }
+                    placeholder="........"
+                  />
+                </label>
+              )}
+              {authMode === "signup" && (
+                <label className="login-field">
+                  Role
+                  <select
+                    value={loginRole}
+                    onChange={(event) => setLoginRole(event.target.value)}
+                  >
+                    <option value="student">Student</option>
+                    <option value="teacher">Teacher</option>
+                  </select>
+                </label>
+              )}
+              {authError && <p className="auth-error">{authError}</p>}
+              {authNotice && <p className="auth-notice">{authNotice}</p>}
+              <button className="accent-button login-button" type="submit">
+                {authMode === "login" ? "Enter Workspace" : "Create Account"}
               </button>
-            )}
-          </form>
-        </section>
-      </main>
+              {authMode === "login" && (
+                <button type="button" className="forgot-link">
+                  Forgot password?
+                </button>
+              )}
+            </form>
+          </section>
+        </main>
+      </PageShell>
     );
   }
 
@@ -1202,86 +1846,89 @@ export default function App() {
 
   if (route.page === "classes") {
     return (
-      <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
-        <header className="teacher-topbar">
-          <div>
-            <p className="teacher-eyebrow">
-              {isTeacher ? "Teacher Workspace" : "Student Workspace"}
-            </p>
-            <h1>Classes</h1>
-          </div>
-          <div className="teacher-actions">
-            <span className="user-pill">{user.name}</span>
-            <span className="role-pill">{user.role}</span>
-            <button className="ghost-button" type="button" onClick={handleLogout}>
-              Log out
-            </button>
-          </div>
-        </header>
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
+          <header className="teacher-topbar">
+            <div>
+              <p className="teacher-eyebrow">
+                {isTeacher ? "Teacher Workspace" : "Student Workspace"}
+              </p>
+              <h1>Classes</h1>
+            </div>
+            <div className="teacher-actions">
+              <span className="user-pill">{user.name}</span>
+              <span className="role-pill">{user.role}</span>
+              <button className="ghost-button" type="button" onClick={handleLogout}>
+                Log out
+              </button>
+            </div>
+          </header>
 
-        <section className="class-section">
-          <div className="class-header">
-            <h2>Your classes</h2>
-            <div className="class-actions">
-              {isTeacher ? (
-                <>
-                  <input
-                    className="class-input"
-                    type="text"
-                    value={className}
-                    onChange={(event) => setClassName(event.target.value)}
-                    placeholder="Class name"
-                  />
-                  <button className="accent-button" type="button" onClick={handleCreateClass}>
-                    Create class
-                  </button>
-                </>
-              ) : (
-                <>
-                  <input
-                    className="class-input"
-                    type="text"
-                    value={joinCode}
-                    onChange={(event) => setJoinCode(event.target.value)}
-                    placeholder="Join code"
-                  />
-                  <button className="accent-button" type="button" onClick={handleJoinClass}>
-                    Join class
-                  </button>
-                </>
+          <section className="class-section">
+            <div className="class-header">
+              <h2>Your classes</h2>
+              <div className="class-actions">
+                {isTeacher ? (
+                  <>
+                    <input
+                      className="class-input"
+                      type="text"
+                      value={className}
+                      onChange={(event) => setClassName(event.target.value)}
+                      placeholder="Class name"
+                    />
+                    <button className="accent-button" type="button" onClick={handleCreateClass}>
+                      Create class
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      className="class-input"
+                      type="text"
+                      value={joinCode}
+                      onChange={(event) => setJoinCode(event.target.value)}
+                      placeholder="Join code"
+                    />
+                    <button className="accent-button" type="button" onClick={handleJoinClass}>
+                      Join class
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            {classError && <p className="auth-error">{classError}</p>}
+            {classNotice && <p className="auth-notice">{classNotice}</p>}
+            <div className="class-grid">
+              {classes.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className="class-pill panel-animate"
+                  onClick={() => handleSelectClass(item.id)}
+                >
+                  <span>{item.name}</span>
+                  <small>{isTeacher ? `Join code: ${item.joinCode}` : "Joined"}</small>
+                </button>
+              ))}
+              {!classes.length && (
+                <p className="empty-state">
+                  {isTeacher
+                    ? "Create a class to start adding lessons."
+                    : "Join a class to see lessons."}
+                </p>
               )}
             </div>
-          </div>
-          {classError && <p className="auth-error">{classError}</p>}
-          {classNotice && <p className="auth-notice">{classNotice}</p>}
-          <div className="class-grid">
-            {classes.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className="class-pill"
-                onClick={() => handleSelectClass(item.id)}
-              >
-                <span>{item.name}</span>
-                <small>{isTeacher ? `Join code: ${item.joinCode}` : "Joined"}</small>
-              </button>
-            ))}
-            {!classes.length && (
-              <p className="empty-state">
-                {isTeacher
-                  ? "Create a class to start adding lessons."
-                  : "Join a class to see lessons."}
-              </p>
-            )}
-          </div>
-        </section>
-      </main>
+          </section>
+        </main>
+      </PageShell>
     );
   }
 
   if (route.page === "class") {
     return (
-      <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
         <header className="teacher-topbar">
           <div>
             <p className="teacher-eyebrow">
@@ -1299,8 +1946,15 @@ export default function App() {
               Back to Classes
             </button>
             {isTeacher && (
-              <button className="accent-button" type="button" onClick={handleAddLesson}>
-                Add lesson
+              <button
+                className="accent-button"
+                type="button"
+                onClick={() => {
+                  const input = document.querySelector(".topic-actions input");
+                  if (input) input.focus();
+                }}
+              >
+                Add topic
               </button>
             )}
             {isTeacher && activeClass && (
@@ -1317,45 +1971,597 @@ export default function App() {
         </header>
 
         <section className="class-detail-grid">
-          <div className="class-detail-panel">
-            <h2>Lessons</h2>
-            {lessons.length === 0 && (
-              <p className="empty-state">No lessons yet for this class.</p>
+          <div
+            className="class-detail-panel panel-animate"
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                (event.target?.tagName === "INPUT" ||
+                  event.target?.tagName === "SELECT")
+              ) {
+                event.preventDefault();
+              }
+            }}
+          >
+            <div className="panel-header">
+              <h2>Topics</h2>
+              {isTeacher && (
+                <div className="topic-actions">
+                  <input
+                    className="class-input"
+                    type="text"
+                    value={topicTitle}
+                    onChange={(event) => setTopicTitle(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        handleCreateTopic();
+                      }
+                    }}
+                    placeholder="Topic title (e.g., Loops)"
+                  />
+                  <button className="accent-button" type="button" onClick={handleCreateTopic}>
+                    Add topic
+                  </button>
+                </div>
+              )}
+            </div>
+            {topicError && <p className="auth-error">{topicError}</p>}
+            {topics.length === 0 && (
+              <p className="empty-state">No topics yet for this class.</p>
             )}
-            <div className="lesson-grid">
-              {lessons.map((item) => (
-                <article key={item.id} className="lesson-card">
-                  <div className="lesson-card-head">
-                    <p className="lesson-card-unit">{item.unit}</p>
-                    <span className="lesson-card-duration">{item.duration}</span>
+            <div className="topic-grid">
+              {topics.map((topic) => (
+                <article key={topic.id} className="topic-card panel-animate">
+                  <div className="topic-header">
+                    {editingTopicId === topic.id ? (
+                      <div className="topic-edit">
+                        <input
+                          className="class-input"
+                          type="text"
+                          value={editingTopicTitle}
+                          onChange={(event) => setEditingTopicTitle(event.target.value)}
+                        />
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          onClick={() => saveEditTopic(topic.id)}
+                        >
+                          Save
+                        </button>
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          onClick={() => setEditingTopicId(null)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="topic-title-row">
+                        <h3>{topic.title}</h3>
+                        {isTeacher && (
+                          <div className="topic-actions-inline">
+                            <button
+                              className="ghost-button"
+                              type="button"
+                              onClick={() => beginEditTopic(topic)}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              className="ghost-button danger"
+                              type="button"
+                              onClick={() => deleteTopic(topic.id)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <span className="topic-pill">Topic</span>
                   </div>
-                  <h3>{item.heading}</h3>
-                  <p className="lesson-card-body">{item.body}</p>
-                  <div className="lesson-card-actions">
-                    <button
-                      className="ghost-button"
-                      type="button"
-                      onClick={() => handleSelectLesson(item.id)}
-                    >
-                      Open lesson
-                    </button>
-                    {isTeacher && (
-                      <button
-                        className="ghost-button danger"
-                        type="button"
-                        onClick={() => handleDeleteLesson(item.id)}
-                      >
-                        Delete
-                      </button>
+                  <div className="topic-sections">
+                    {(topic.items || []).length ? (
+                      (topic.items || []).map((item) => (
+                        <div key={item.id} className="topic-section-row">
+                          {editingItemId === item.id ? (
+                            <div className="topic-item-edit">
+                              <input
+                                className="class-input"
+                                type="text"
+                                value={editingItemTitle}
+                                onChange={(event) => setEditingItemTitle(event.target.value)}
+                                placeholder="Item title"
+                              />
+                              <div className="topic-type-toggle">
+                                <button
+                                  className={editingItemType === "learning" ? "ghost-button active" : "ghost-button"}
+                                  type="button"
+                                  onClick={() => setEditingItemType("learning")}
+                                >
+                                  Learning
+                                </button>
+                                <button
+                                  className={editingItemType === "quiz" ? "ghost-button active" : "ghost-button"}
+                                  type="button"
+                                  onClick={() => setEditingItemType("quiz")}
+                                >
+                                  Quiz
+                                </button>
+                                <button
+                                  className={editingItemType === "practice" ? "ghost-button active" : "ghost-button"}
+                                  type="button"
+                                  onClick={() => setEditingItemType("practice")}
+                                >
+                                  Practice
+                                </button>
+                              </div>
+                              {editingItemType === "quiz" && (
+                                <div className="quiz-builder">
+                                  <p className="progress-meta">Question type</p>
+                                  <div className="topic-type-toggle">
+                                    <button
+                                      className={
+                                        editingItemQuizSubtype === "mcq"
+                                          ? "ghost-button active"
+                                          : "ghost-button"
+                                      }
+                                      type="button"
+                                      onClick={() => setEditingItemQuizSubtype("mcq")}
+                                    >
+                                      MCQ
+                                    </button>
+                                    <button
+                                      className={
+                                        editingItemQuizSubtype === "short_answer"
+                                          ? "ghost-button active"
+                                          : "ghost-button"
+                                      }
+                                      type="button"
+                                      onClick={() => setEditingItemQuizSubtype("short_answer")}
+                                    >
+                                      Short Answer
+                                    </button>
+                                  </div>
+                                  <input
+                                    className="class-input"
+                                    type="text"
+                                    value={editingItemQuizQuestion}
+                                    onChange={(event) =>
+                                      setEditingItemQuizQuestion(event.target.value)
+                                    }
+                                    placeholder="Quiz question"
+                                  />
+                                  {editingItemQuizSubtype === "mcq" ? (
+                                    <div className="quiz-options-builder">
+                                      <div className="quiz-option-row">
+                                        <input
+                                          className="class-input"
+                                          type="text"
+                                          value={editingItemQuizOptionInput}
+                                          onChange={(event) =>
+                                            setEditingItemQuizOptionInput(event.target.value)
+                                          }
+                                          placeholder="Choice text"
+                                        />
+                                        <button
+                                          className="ghost-button"
+                                          type="button"
+                                          onClick={() => {
+                                            const value = editingItemQuizOptionInput.trim();
+                                            if (!value) return;
+                                            const next = upsertOption(
+                                              editingItemQuizOptions,
+                                              editingItemQuizOptionEditIndex,
+                                              value
+                                            );
+                                            setEditingItemQuizOptions(next);
+                                            if (
+                                              editingItemQuizAnswer &&
+                                              editingItemQuizOptionEditIndex >= 0 &&
+                                              editingItemQuizOptions[editingItemQuizOptionEditIndex] !== value
+                                            ) {
+                                              setEditingItemQuizAnswer("");
+                                            }
+                                            setEditingItemQuizOptionInput("");
+                                            setEditingItemQuizOptionEditIndex(-1);
+                                          }}
+                                        >
+                                          {editingItemQuizOptionEditIndex >= 0 ? "Update choice" : "Add choice"}
+                                        </button>
+                                      </div>
+                                      <div className="quiz-options-list">
+                                        {editingItemQuizOptions.map((option, optionIndex) => (
+                                          <div key={`${option}-${optionIndex}`} className="quiz-option-item">
+                                            <span>{option}</span>
+                                            <div className="topic-item-actions">
+                                              <button
+                                                className="ghost-button"
+                                                type="button"
+                                                onClick={() => {
+                                                  setEditingItemQuizOptionInput(option);
+                                                  setEditingItemQuizOptionEditIndex(optionIndex);
+                                                }}
+                                              >
+                                                Edit
+                                              </button>
+                                              <button
+                                                className="ghost-button danger"
+                                                type="button"
+                                                onClick={() => {
+                                                  const next = editingItemQuizOptions.filter(
+                                                    (_, idx) => idx !== optionIndex
+                                                  );
+                                                  setEditingItemQuizOptions(next);
+                                                  if (editingItemQuizAnswer === option) {
+                                                    setEditingItemQuizAnswer("");
+                                                  }
+                                                  if (editingItemQuizOptionEditIndex === optionIndex) {
+                                                    setEditingItemQuizOptionEditIndex(-1);
+                                                    setEditingItemQuizOptionInput("");
+                                                  }
+                                                }}
+                                              >
+                                                Delete
+                                              </button>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                      <select
+                                        className="class-input"
+                                        value={editingItemQuizAnswer}
+                                        onChange={(event) =>
+                                          setEditingItemQuizAnswer(event.target.value)
+                                        }
+                                      >
+                                        <option value="">Select correct answer</option>
+                                        {editingItemQuizOptions.map((option) => (
+                                          <option key={option} value={option}>
+                                            {option}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  ) : (
+                                    <input
+                                      className="class-input"
+                                      type="text"
+                                      value={editingItemQuizAnswer}
+                                      onChange={(event) =>
+                                        setEditingItemQuizAnswer(event.target.value)
+                                      }
+                                      placeholder="Expected answer"
+                                    />
+                                  )}
+                                </div>
+                              )}
+                              <div className="topic-item-actions">
+                                <button
+                                  className="ghost-button"
+                                  type="button"
+                                  onClick={() => saveEditItem(topic.id, item.id)}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  className="ghost-button"
+                                  type="button"
+                                  onClick={() => setEditingItemId(null)}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <span className={`topic-type type-${item.type}`}>
+                                {item.type}
+                              </span>
+                              <div className="topic-item-main">
+                                <span className="topic-item-title">{item.title}</span>
+                                {item.type === "quiz" && item.quizQuestion && (
+                                  <span className="topic-item-meta">
+                                    {item.quizSubtype === "mcq" ? "MCQ" : "Short answer"}:{" "}
+                                    {item.quizQuestion}
+                                  </span>
+                                )}
+                              </div>
+                              {isTeacher && (
+                                <div className="topic-item-actions">
+                                  <button
+                                    className="ghost-button"
+                                    type="button"
+                                    onClick={() => beginEditItem(item)}
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    className="ghost-button danger"
+                                    type="button"
+                                    onClick={() => deleteItem(topic.id, item.id)}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              )}
+                              {!isTeacher && item.type === "practice" && (
+                                <button
+                                  className="ghost-button"
+                                  type="button"
+                                  onClick={() => navigateToPractice(activeClassId, item.id)}
+                                >
+                                  Open
+                                </button>
+                              )}
+                              {!isTeacher && item.type === "quiz" && (
+                                <button
+                                  className="ghost-button"
+                                  type="button"
+                                  onClick={() => navigateToQuiz(activeClassId, item.id)}
+                                >
+                                  Open
+                                </button>
+                              )}
+                              {isTeacher && item.type === "practice" && (
+                                <button
+                                  className="ghost-button"
+                                  type="button"
+                                  onClick={() => navigateToPractice(activeClassId, item.id)}
+                                >
+                                  Open
+                                </button>
+                              )}
+                              {isTeacher && item.type === "quiz" && (
+                                <button
+                                  className="ghost-button"
+                                  type="button"
+                                  onClick={() => navigateToQuiz(activeClassId, item.id)}
+                                >
+                                  Open
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <p className="empty-state">No learning, quizzes, or practice yet.</p>
                     )}
                   </div>
+                  {isTeacher && (
+                    <div className="topic-item-form">
+                      <input
+                        className="class-input"
+                        type="text"
+                        value={(topicItemDrafts[topic.id]?.title) || ""}
+                        onChange={(event) =>
+                          updateTopicDraft(topic.id, { title: event.target.value })
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            handleCreateTopicItem(topic.id);
+                          }
+                        }}
+                        placeholder="Item title"
+                      />
+                      <div className="topic-type-toggle">
+                        <button
+                          className={
+                            ((topicItemDrafts[topic.id]?.type) || "learning") === "learning"
+                              ? "ghost-button active"
+                              : "ghost-button"
+                          }
+                          type="button"
+                          onClick={() =>
+                            updateTopicDraft(topic.id, { type: "learning" })
+                          }
+                        >
+                          Learning
+                        </button>
+                        <button
+                          className={
+                            ((topicItemDrafts[topic.id]?.type) || "learning") === "quiz"
+                              ? "ghost-button active"
+                              : "ghost-button"
+                          }
+                          type="button"
+                          onClick={() =>
+                            updateTopicDraft(topic.id, { type: "quiz" })
+                          }
+                        >
+                          Quiz
+                        </button>
+                        <button
+                          className={
+                            ((topicItemDrafts[topic.id]?.type) || "learning") === "practice"
+                              ? "ghost-button active"
+                              : "ghost-button"
+                          }
+                          type="button"
+                          onClick={() =>
+                            updateTopicDraft(topic.id, { type: "practice" })
+                          }
+                        >
+                          Practice
+                        </button>
+                      </div>
+                      {(topicItemDrafts[topic.id]?.type || "learning") === "quiz" && (
+                        <div className="quiz-builder">
+                          <p className="progress-meta">Question type</p>
+                          <div className="topic-type-toggle">
+                            <button
+                              className={
+                                ((topicItemDrafts[topic.id]?.quizSubtype) || "mcq") === "mcq"
+                                  ? "ghost-button active"
+                                  : "ghost-button"
+                              }
+                              type="button"
+                              onClick={() =>
+                                updateTopicDraft(topic.id, { quizSubtype: "mcq" })
+                              }
+                            >
+                              MCQ
+                            </button>
+                            <button
+                              className={
+                                ((topicItemDrafts[topic.id]?.quizSubtype) || "mcq") ===
+                                "short_answer"
+                                  ? "ghost-button active"
+                                  : "ghost-button"
+                              }
+                              type="button"
+                              onClick={() =>
+                                updateTopicDraft(topic.id, { quizSubtype: "short_answer" })
+                              }
+                            >
+                              Short Answer
+                            </button>
+                          </div>
+                          <input
+                            className="class-input"
+                            type="text"
+                            value={(topicItemDrafts[topic.id]?.quizQuestion) || ""}
+                            onChange={(event) =>
+                              updateTopicDraft(topic.id, { quizQuestion: event.target.value })
+                            }
+                            placeholder="Quiz question"
+                          />
+                          {((topicItemDrafts[topic.id]?.quizSubtype) || "mcq") === "mcq" ? (
+                            <div className="quiz-options-builder">
+                              <div className="quiz-option-row">
+                                <input
+                                  className="class-input"
+                                  type="text"
+                                  value={(topicItemDrafts[topic.id]?.quizOptionInput) || ""}
+                                  onChange={(event) =>
+                                    updateTopicDraft(topic.id, { quizOptionInput: event.target.value })
+                                  }
+                                  placeholder="Choice text"
+                                />
+                                <button
+                                  className="ghost-button"
+                                  type="button"
+                                  onClick={() => {
+                                    const draft = topicItemDrafts[topic.id] || createTopicItemDraft();
+                                    const value = `${draft.quizOptionInput || ""}`.trim();
+                                    if (!value) return;
+                                    const nextOptions = upsertOption(
+                                      draft.quizOptions,
+                                      draft.quizOptionEditIndex,
+                                      value
+                                    );
+                                    const nextAnswer =
+                                      draft.quizOptionEditIndex >= 0 &&
+                                      draft.quizAnswer === draft.quizOptions?.[draft.quizOptionEditIndex]
+                                        ? value
+                                        : draft.quizAnswer;
+                                    updateTopicDraft(topic.id, {
+                                      quizOptions: nextOptions,
+                                      quizOptionInput: "",
+                                      quizOptionEditIndex: -1,
+                                      quizAnswer: nextAnswer,
+                                    });
+                                  }}
+                                >
+                                  {((topicItemDrafts[topic.id]?.quizOptionEditIndex) ?? -1) >= 0
+                                    ? "Update choice"
+                                    : "Add choice"}
+                                </button>
+                              </div>
+                              <div className="quiz-options-list">
+                                {((topicItemDrafts[topic.id]?.quizOptions) || []).map((option, optionIndex) => (
+                                  <div key={`${option}-${optionIndex}`} className="quiz-option-item">
+                                    <span>{option}</span>
+                                    <div className="topic-item-actions">
+                                      <button
+                                        className="ghost-button"
+                                        type="button"
+                                        onClick={() =>
+                                          updateTopicDraft(topic.id, {
+                                            quizOptionInput: option,
+                                            quizOptionEditIndex: optionIndex,
+                                          })
+                                        }
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        className="ghost-button danger"
+                                        type="button"
+                                        onClick={() => {
+                                          const draft = topicItemDrafts[topic.id] || createTopicItemDraft();
+                                          const next = (draft.quizOptions || []).filter(
+                                            (_, idx) => idx !== optionIndex
+                                          );
+                                          updateTopicDraft(topic.id, {
+                                            quizOptions: next,
+                                            quizOptionInput:
+                                              draft.quizOptionEditIndex === optionIndex
+                                                ? ""
+                                                : draft.quizOptionInput,
+                                            quizOptionEditIndex:
+                                              draft.quizOptionEditIndex === optionIndex
+                                                ? -1
+                                                : draft.quizOptionEditIndex,
+                                            quizAnswer:
+                                              draft.quizAnswer === option ? "" : draft.quizAnswer,
+                                          });
+                                        }}
+                                      >
+                                        Delete
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                              <select
+                                className="class-input"
+                                value={(topicItemDrafts[topic.id]?.quizAnswer) || ""}
+                                onChange={(event) =>
+                                  updateTopicDraft(topic.id, { quizAnswer: event.target.value })
+                                }
+                              >
+                                <option value="">Select correct answer</option>
+                                {((topicItemDrafts[topic.id]?.quizOptions) || []).map((option) => (
+                                  <option key={option} value={option}>
+                                    {option}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ) : (
+                            <input
+                              className="class-input"
+                              type="text"
+                              value={(topicItemDrafts[topic.id]?.quizAnswer) || ""}
+                              onChange={(event) =>
+                                updateTopicDraft(topic.id, { quizAnswer: event.target.value })
+                              }
+                              placeholder="Expected answer"
+                            />
+                          )}
+                        </div>
+                      )}
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={() => handleCreateTopicItem(topic.id)}
+                      >
+                        Add
+                      </button>
+                    </div>
+                  )}
                 </article>
               ))}
             </div>
           </div>
 
           {isTeacher && (
-            <div className="class-detail-panel student-panel">
+            <div className="class-detail-panel student-panel panel-animate">
               <div className="panel-header">
                 <h2>Students</h2>
                 <button className="ghost-button" type="button" onClick={handleRefreshStudents}>
@@ -1372,8 +2578,8 @@ export default function App() {
                     type="button"
                     className={
                       student.id === selectedStudentId
-                        ? "student-row selected"
-                        : "student-row"
+                        ? "student-row selected panel-animate"
+                        : "student-row panel-animate"
                     }
                     onClick={() => handleSelectStudent(student)}
                   >
@@ -1388,12 +2594,124 @@ export default function App() {
           )}
         </section>
       </main>
+      </PageShell>
+    );
+  }
+
+  if (route.page === "quiz") {
+    const isMcq = quizMeta?.quizSubtype === "mcq";
+    return (
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
+          <header className="teacher-topbar">
+            <div>
+              <p className="teacher-eyebrow">
+                {isTeacher ? "Teacher Workspace" : "Student Workspace"}
+              </p>
+              <h1>{quizMeta?.title || "Quiz"}</h1>
+              {activeClass && (
+                <p className="class-subtitle">Class: {activeClass.name}</p>
+              )}
+            </div>
+            <div className="teacher-actions">
+              <button className="ghost-button" type="button" onClick={() => navigateToClass(activeClassId)}>
+                Back to Class
+              </button>
+              <button className="ghost-button" type="button" onClick={navigateToClasses}>
+                Back to Classes
+              </button>
+              <span className="user-pill">{user.name}</span>
+              <span className="role-pill">{user.role}</span>
+              <button className="ghost-button" type="button" onClick={handleLogout}>
+                Log out
+              </button>
+            </div>
+          </header>
+
+          <section className="class-detail-panel panel-animate">
+            {quizLoading && <p className="empty-state">Loading quiz…</p>}
+            {quizError && <p className="auth-error">{quizError}</p>}
+            {!quizLoading && !quizError && quizMeta && (
+              <div className="quiz-layout">
+                <p className="progress-meta">
+                  {quizMeta.topic?.title || "Topic"} · {isMcq ? "MCQ" : "Short answer"}
+                </p>
+                <h2>{quizMeta.quizQuestion || "No question set yet."}</h2>
+                {isMcq ? (
+                  <div className="quiz-options">
+                    {(quizMeta.quizOptions || []).map((option) => (
+                      <label key={option} className="quiz-option">
+                        <input
+                          type="radio"
+                          name="quiz-option"
+                          value={option}
+                          checked={quizResponse === option}
+                          onChange={(event) => setQuizResponse(event.target.value)}
+                          disabled={quizSubmitting || user.role !== "student"}
+                        />
+                        <span>{option}</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <textarea
+                    className="lesson-textarea"
+                    value={quizResponse}
+                    onChange={(event) => setQuizResponse(event.target.value)}
+                    placeholder="Write your answer..."
+                    rows={6}
+                    disabled={quizSubmitting || user.role !== "student"}
+                  />
+                )}
+
+                {user.role === "student" && (
+                  <div className="topic-item-actions">
+                    <button
+                      className="accent-button"
+                      type="button"
+                      onClick={submitQuiz}
+                      disabled={quizSubmitting}
+                    >
+                      {quizSubmitting ? "Submitting..." : "Submit answer"}
+                    </button>
+                  </div>
+                )}
+
+                {quizAttempt && (
+                  <div className="student-progress panel-animate">
+                    <div className="progress-row">
+                      <div>
+                        <p className="progress-title">Latest submission</p>
+                        <p className="progress-meta">
+                          Attempts: {quizAttempt.attempts || 0}
+                        </p>
+                      </div>
+                      <div className={`progress-status status-${quizAttempt.gradingStatus}`}>
+                        {quizAttempt.gradingStatus.replace("_", " ")}
+                      </div>
+                    </div>
+                    {typeof quizAttempt.isCorrect === "boolean" && (
+                      <p className="progress-meta">
+                        Result: {quizAttempt.isCorrect ? "Correct" : "Incorrect"}
+                      </p>
+                    )}
+                    {quizAttempt.feedback && (
+                      <p className="progress-meta">Feedback: {quizAttempt.feedback}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </main>
+      </PageShell>
     );
   }
 
   if (route.page === "student") {
     return (
-      <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
         <header className="teacher-topbar">
           <div>
             <p className="teacher-eyebrow">Teacher Workspace</p>
@@ -1428,7 +2746,8 @@ export default function App() {
           </div>
         </header>
 
-        <section className="class-detail-panel">
+        <section className="class-detail-panel panel-animate">
+          {practiceError && <p className="auth-error">{practiceError}</p>}
           {studentProgressLoading && (
             <p className="empty-state">Loading progress…</p>
           )}
@@ -1440,7 +2759,7 @@ export default function App() {
             (studentProgress.length ? (
               <div className="progress-list">
                 {studentProgress.map((item) => (
-                  <div key={item.lessonId} className="progress-row">
+                  <div key={item.lessonId} className="progress-row panel-animate">
                     <div>
                       <p className="progress-title">{item.heading}</p>
                       <p className="progress-meta">{item.unit} · {item.duration}</p>
@@ -1448,6 +2767,15 @@ export default function App() {
                     <div className={`progress-status status-${item.status}`}>
                       {item.status.replace("_", " ")}
                     </div>
+                    {item.status === "completed" && item.lastCode && (
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={() => setSelectedProgress(item)}
+                      >
+                        View code
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1455,12 +2783,118 @@ export default function App() {
               <p className="empty-state">No progress yet.</p>
             ))}
         </section>
-      </main>
+        <section className="class-detail-panel panel-animate">
+          <div className="panel-header">
+            <h2>Quiz attempts</h2>
+          </div>
+          {!studentProgressLoading && !studentProgressError && (
+            studentQuizAttempts.length ? (
+              <div className="progress-list">
+                {studentQuizAttempts.map((item) => (
+                  <div key={item.id} className="progress-row panel-animate">
+                    <div>
+                      <p className="progress-title">{item.itemTitle}</p>
+                      <p className="progress-meta">
+                        {item.topicTitle || "Topic"} · {item.quizSubtype === "mcq" ? "MCQ" : "Short answer"}
+                      </p>
+                    </div>
+                    <div className={`progress-status status-${item.gradingStatus}`}>
+                      {item.gradingStatus.replace("_", " ")}
+                    </div>
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => {
+                        setSelectedQuizAttempt(item);
+                        setQuizGradeFeedback(item.feedback || "");
+                      }}
+                    >
+                      View response
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="empty-state">No quiz attempts yet.</p>
+            )
+          )}
+        </section>
+        {selectedProgress && (
+          <section className="class-detail-panel code-panel panel-animate">
+            <div className="panel-header">
+              <h2>{selectedProgress.heading}</h2>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => setSelectedProgress(null)}
+              >
+                Close
+              </button>
+            </div>
+            <pre className="code-block">
+              <code>{selectedProgress.lastCode}</code>
+            </pre>
+          </section>
+        )}
+        {selectedQuizAttempt && (
+          <section className="class-detail-panel code-panel panel-animate">
+            <div className="panel-header">
+              <h2>{selectedQuizAttempt.itemTitle}</h2>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => setSelectedQuizAttempt(null)}
+              >
+                Close
+              </button>
+            </div>
+            {selectedQuizAttempt.quizQuestion && (
+              <p className="progress-meta">{selectedQuizAttempt.quizQuestion}</p>
+            )}
+            <pre className="code-block">
+              <code>{selectedQuizAttempt.responseText || "No response recorded."}</code>
+            </pre>
+            <div className="quiz-grade-panel">
+              <p className="progress-meta">
+                Current status: {selectedQuizAttempt.gradingStatus.replace("_", " ")}
+              </p>
+              <textarea
+                className="lesson-textarea"
+                rows={4}
+                value={quizGradeFeedback}
+                onChange={(event) => setQuizGradeFeedback(event.target.value)}
+                placeholder="Optional feedback for student"
+                disabled={quizGrading}
+              />
+              <div className="topic-item-actions">
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => gradeSelectedQuizAttempt(true)}
+                  disabled={quizGrading}
+                >
+                  Mark correct
+                </button>
+                <button
+                  className="ghost-button danger"
+                  type="button"
+                  onClick={() => gradeSelectedQuizAttempt(false)}
+                  disabled={quizGrading}
+                >
+                  Mark incorrect
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+        </main>
+      </PageShell>
     );
   }
 
   return (
-    <main className="workspace">
+    <PageShell className={`page-shell ${pageTransition}`}>
+      <main className="workspace">
       {toast && (
         <div className={`toast toast-${toast.type}`}>{toast.message}</div>
       )}
@@ -1510,7 +2944,7 @@ export default function App() {
       </header>
 
       <section className="workspace-grid">
-        <aside className="panel lesson-panel">
+        <aside className="panel lesson-panel panel-animate">
           <div className="class-summary">
             <p className="class-summary-title">Class</p>
             <strong>{activeClass ? activeClass.name : "Select a class"}</strong>
@@ -1670,7 +3104,7 @@ export default function App() {
           )}
         </aside>
 
-        <article className="panel editor-panel">
+        <article className="panel editor-panel panel-animate">
           <div className="editor-header">
             <div className="file-pill">
               <span className="file-dot" />
@@ -1694,7 +3128,7 @@ export default function App() {
           </div>
         </article>
 
-        <aside className="panel output-panel">
+        <aside className="panel output-panel panel-animate">
           <div className="output-header">
             <h2>Console</h2>
             <span className="output-status">Ready</span>
@@ -1705,5 +3139,6 @@ export default function App() {
         </aside>
       </section>
     </main>
+    </PageShell>
   );
 }
