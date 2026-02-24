@@ -10,6 +10,7 @@ const topicSchema = new mongoose.Schema(
     title: { type: String, required: true, trim: true },
     concepts: { type: [String], default: [] },
     createdBy: { type: String, required: true },
+    order: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

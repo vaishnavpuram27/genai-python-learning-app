@@ -23,22 +23,27 @@ import {
   upsertQuizAttemptByUserAndItem,
 } from "../services/quizAttemptService.js";
 import {
+  countTopicsByClass,
   createTopic,
   deleteTopicById,
   getTopicById,
   listTopicsByClass,
+  reorderTopics,
   updateTopic,
 } from "../services/topicService.js";
 import {
+  countTopicItemsByTopic,
   createTopicItem,
   deleteTopicItemById,
   getTopicItemById,
   getTopicItemWithTopic,
   listTopicItemsByClass,
   listTopicItemsByTopic,
+  reorderTopicItems,
   updateTopicItem,
 } from "../services/topicItemService.js";
 import { sendError, sendSuccess } from "../utils/responses.js";
+import { gradeShortAnswer } from "../services/chatService.js";
 
 const TOPIC_ITEM_TYPES = ["learning", "quiz", "practice"];
 const QUIZ_SUBTYPES = ["mcq", "short_answer"];
@@ -168,17 +173,19 @@ function toTopicResponse(topic) {
     concepts: topic.concepts,
     classId: topic.classId.toString(),
     createdBy: topic.createdBy,
+    order: topic.order ?? 0,
     createdAt: topic.createdAt,
     updatedAt: topic.updatedAt,
   };
 }
 
 function normalizeTopicItem(item) {
-  return {
+  const base = {
     id: item._id.toString(),
     topicId: item.topicId.toString(),
     type: item.type,
     title: item.title,
+    order: item.order ?? 0,
     quizSubtype: item.quizSubtype || null,
     quizQuestion: item.quizQuestion || "",
     quizOptions: Array.isArray(item.quizOptions) ? item.quizOptions : [],
@@ -186,6 +193,13 @@ function normalizeTopicItem(item) {
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   };
+  if (item.type === "learning" || item.type === "practice") {
+    base.practiceBody         = item.practiceBody         || "";
+    base.practiceInstructions = item.practiceInstructions || "";
+    base.practiceHints        = Array.isArray(item.practiceHints) ? item.practiceHints : [];
+    base.practiceCodeStarter  = item.practiceCodeStarter  || "";
+  }
+  return base;
 }
 
 function resolveQuizFields(payload, currentType, currentItem = null) {
@@ -258,12 +272,14 @@ export async function listTopics(req, res) {
   }, {});
 
   return sendSuccess(res, {
-    topics: topics.map((topic) => ({
-      ...toTopicResponse(topic),
-      items: (itemsByTopic[topic._id.toString()] || []).sort(
-        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-      ),
-    })),
+    topics: topics
+      .sort((a, b) => a.order - b.order || new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+      .map((topic) => ({
+        ...toTopicResponse(topic),
+        items: (itemsByTopic[topic._id.toString()] || []).sort(
+          (a, b) => a.order - b.order || new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        ),
+      })),
   });
 }
 
@@ -283,13 +299,35 @@ export async function createTopicHandler(req, res) {
   if (!payload.title) {
     return sendError(res, "Topic title is required", 400, "VALIDATION_ERROR");
   }
+  const order = await countTopicsByClass(classroom._id);
   const topic = await createTopic({
     classId: classroom._id,
     title: payload.title,
     concepts: Array.isArray(payload.concepts) ? payload.concepts : [],
     createdBy: req.user.id,
+    order,
   });
   return sendSuccess(res, { topic: toTopicResponse(topic) }, 201);
+}
+
+export async function reorderTopicsHandler(req, res) {
+  if (req.user.role !== "teacher") {
+    return sendError(res, "Only teachers can reorder topics", 403, "FORBIDDEN");
+  }
+  const classroom = await getClassById(req.params.id);
+  if (!classroom) {
+    return sendError(res, "Class not found", 404, "NOT_FOUND");
+  }
+  const membership = await getMembership(req.user.id, classroom._id);
+  if (!membership || membership.role !== "teacher") {
+    return sendError(res, "Forbidden", 403, "FORBIDDEN");
+  }
+  const { topicIds } = req.body || {};
+  if (!Array.isArray(topicIds) || topicIds.length === 0) {
+    return sendError(res, "topicIds array is required", 400, "VALIDATION_ERROR");
+  }
+  await reorderTopics(topicIds);
+  return sendSuccess(res, { ok: true });
 }
 
 export async function updateTopicHandler(req, res) {
@@ -331,14 +369,13 @@ export async function deleteTopicHandler(req, res) {
   if (!topic || topic.classId.toString() !== classroom._id.toString()) {
     return sendError(res, "Topic not found", 404, "NOT_FOUND");
   }
-  await Promise.all(listTopicItemsByTopic(topic._id).then((items) =>
-    Promise.all(
-      items.map(async (item) => {
-        await deleteQuizAttemptsByItem(item._id);
-        return deleteTopicItemById(item._id);
-      })
-    )
-  ));
+  const itemsToDelete = await listTopicItemsByTopic(topic._id);
+  await Promise.all(
+    itemsToDelete.map(async (item) => {
+      await deleteQuizAttemptsByItem(item._id);
+      return deleteTopicItemById(item._id);
+    })
+  );
   await deleteTopicById(topic._id);
   return sendSuccess(res, { success: true });
 }
@@ -366,14 +403,50 @@ export async function createTopicItemHandler(req, res) {
   if (quizFields.error) {
     return sendError(res, quizFields.error, 400, "VALIDATION_ERROR");
   }
+  const practiceFields = {};
+  if (payload.type === "practice" || payload.type === "learning") {
+    if (payload.practiceBody         !== undefined) practiceFields.practiceBody         = payload.practiceBody;
+    if (payload.practiceInstructions !== undefined) practiceFields.practiceInstructions = payload.practiceInstructions;
+    if (payload.practiceHints        !== undefined) practiceFields.practiceHints        = payload.practiceHints;
+    if (payload.practiceCodeStarter  !== undefined) practiceFields.practiceCodeStarter  = payload.practiceCodeStarter;
+  }
+  if (payload.type === "practice") {
+    if (payload.practiceQuestion     !== undefined) practiceFields.practiceQuestion     = payload.practiceQuestion;
+    if (payload.practiceModelAnswer  !== undefined) practiceFields.practiceModelAnswer  = payload.practiceModelAnswer;
+    if (payload.practiceTestMode     !== undefined) practiceFields.practiceTestMode     = payload.practiceTestMode;
+    if (payload.practiceTestCases    !== undefined) practiceFields.practiceTestCases    = payload.practiceTestCases;
+  }
+  const order = await countTopicItemsByTopic(req.params.topicId);
   const item = await createTopicItem({
     classId: classroom._id,
     topicId: req.params.topicId,
     type: payload.type,
     title: payload.title,
+    order,
     ...quizFields,
+    ...practiceFields,
   });
   return sendSuccess(res, { item: normalizeTopicItem(item) }, 201);
+}
+
+export async function reorderTopicItemsHandler(req, res) {
+  if (req.user.role !== "teacher") {
+    return sendError(res, "Only teachers can reorder items", 403, "FORBIDDEN");
+  }
+  const classroom = await getClassById(req.params.id);
+  if (!classroom) {
+    return sendError(res, "Class not found", 404, "NOT_FOUND");
+  }
+  const membership = await getMembership(req.user.id, classroom._id);
+  if (!membership || membership.role !== "teacher") {
+    return sendError(res, "Forbidden", 403, "FORBIDDEN");
+  }
+  const { itemIds } = req.body || {};
+  if (!Array.isArray(itemIds) || itemIds.length === 0) {
+    return sendError(res, "itemIds array is required", 400, "VALIDATION_ERROR");
+  }
+  await reorderTopicItems(itemIds);
+  return sendSuccess(res, { ok: true });
 }
 
 export async function updateTopicItemHandler(req, res) {
@@ -404,7 +477,22 @@ export async function updateTopicItemHandler(req, res) {
   if (quizFields.error) {
     return sendError(res, quizFields.error, 400, "VALIDATION_ERROR");
   }
-  const updated = await updateTopicItem(item._id, { ...update, ...quizFields });
+  // Persist content fields when updating a practice or learning item
+  const practiceFields = {};
+  if (update.type === "practice" || item.type === "practice" ||
+      update.type === "learning"  || item.type === "learning") {
+    if (payload.practiceBody         !== undefined) practiceFields.practiceBody         = payload.practiceBody;
+    if (payload.practiceInstructions !== undefined) practiceFields.practiceInstructions = payload.practiceInstructions;
+    if (payload.practiceHints        !== undefined) practiceFields.practiceHints        = payload.practiceHints;
+    if (payload.practiceCodeStarter  !== undefined) practiceFields.practiceCodeStarter  = payload.practiceCodeStarter;
+  }
+  if (update.type === "practice" || item.type === "practice") {
+    if (payload.practiceQuestion     !== undefined) practiceFields.practiceQuestion     = payload.practiceQuestion;
+    if (payload.practiceModelAnswer  !== undefined) practiceFields.practiceModelAnswer  = payload.practiceModelAnswer;
+    if (payload.practiceTestMode     !== undefined) practiceFields.practiceTestMode     = payload.practiceTestMode;
+    if (payload.practiceTestCases    !== undefined) practiceFields.practiceTestCases    = payload.practiceTestCases;
+  }
+  const updated = await updateTopicItem(item._id, { ...update, ...quizFields, ...practiceFields });
   return sendSuccess(res, { item: normalizeTopicItem(updated) });
 }
 
@@ -454,6 +542,47 @@ export async function getPracticeItem(req, res) {
         id: item.topicId?._id?.toString?.() || item.topicId?.toString?.(),
         title: item.topicId?.title || "",
       },
+      practiceBody:         item.practiceBody         || "",
+      practiceInstructions: item.practiceInstructions || "",
+      practiceQuestion:     item.practiceQuestion     || "",
+      practiceHints:        item.practiceHints        || [],
+      practiceCodeStarter:  item.practiceCodeStarter  || "",
+      practiceModelAnswer:  item.practiceModelAnswer  || "",
+      practiceTestMode:     item.practiceTestMode     || false,
+      practiceTestCases:    item.practiceTestCases    || [],
+    },
+  });
+}
+
+export async function getLearningItem(req, res) {
+  const classroom = await getClassById(req.params.id);
+  if (!classroom) {
+    return sendError(res, "Class not found", 404, "NOT_FOUND");
+  }
+  const membership = await getMembership(req.user.id, classroom._id);
+  if (!membership) {
+    return sendError(res, "Forbidden", 403, "FORBIDDEN");
+  }
+  const item = await getTopicItemWithTopic(req.params.itemId);
+  if (!item || item.classId.toString() !== classroom._id.toString()) {
+    return sendError(res, "Item not found", 404, "NOT_FOUND");
+  }
+  if (item.type !== "learning") {
+    return sendError(res, "Not a learning item", 400, "INVALID_TYPE");
+  }
+  return sendSuccess(res, {
+    item: {
+      id: item._id.toString(),
+      title: item.title,
+      type: item.type,
+      topic: {
+        id: item.topicId?._id?.toString?.() || item.topicId?.toString?.(),
+        title: item.topicId?.title || "",
+      },
+      practiceBody:         item.practiceBody         || "",
+      practiceInstructions: item.practiceInstructions || "",
+      practiceHints:        item.practiceHints        || [],
+      practiceCodeStarter:  item.practiceCodeStarter  || "",
     },
   });
 }
@@ -522,6 +651,7 @@ export async function submitQuizAttempt(req, res) {
   let gradingStatus = "pending";
   let isCorrect = null;
   let score = null;
+  let feedback = "";
   let gradedAt = null;
   const subtype = item.quizSubtype || "mcq";
 
@@ -539,6 +669,26 @@ export async function submitQuizAttempt(req, res) {
       gradingStatus = "auto_graded";
       gradedAt = new Date();
     }
+  } else if (subtype === "short_answer") {
+    const expected = `${item.quizAnswer || ""}`.trim();
+    if (expected) {
+      try {
+        const grading = await gradeShortAnswer({
+          question: item.quizQuestion || "",
+          expectedAnswer: expected,
+          studentResponse: responseText,
+        });
+        isCorrect = grading.isCorrect;
+        score = grading.score;
+        feedback = grading.feedback;
+        status = "graded";
+        gradingStatus = "auto_graded";
+        gradedAt = new Date();
+      } catch {
+        // LLM grading failed — leave as pending for teacher review
+        feedback = "Auto-grading unavailable. Awaiting teacher review.";
+      }
+    }
   }
 
   const attempt = await upsertQuizAttemptByUserAndItem(
@@ -551,7 +701,7 @@ export async function submitQuizAttempt(req, res) {
         gradingStatus,
         isCorrect,
         score,
-        feedback: "",
+        feedback,
         submittedAt: new Date(),
         gradedAt,
       },

@@ -1,4 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import "highlight.js/styles/github-dark.css";
 
 const initialLesson = {
   unit: "Hello World",
@@ -49,6 +53,135 @@ function upsertOption(options, index, value) {
     next.push(value);
   }
   return next.filter(Boolean);
+}
+
+function stripMachineBlocks(content) {
+  // Use greedy match so we strip to the LAST closing ``` (handles nested
+  // backtick blocks that may appear inside the JSON values).
+  return content
+    .replace(/```mcq-json[\s\S]*\n```/g, "")
+    .replace(/```sa-json[\s\S]*\n```/g, "")
+    .replace(/```practice-json[\s\S]*\n```/g, "")
+    .replace(/```lesson-plan-json[\s\S]*\n```/g, "")
+    .replace(/```learning-json[\s\S]*\n```/g, "")
+    .trim();
+}
+
+function parseMcqFromMessage(content) {
+  // Match from ```mcq-json to the LAST ``` on its own line, to avoid
+  // being tripped up by any backtick fences that appear inside the JSON.
+  const match = content.match(/```mcq-json\s*\n([\s\S]*)\n```/);
+  if (!match) return null;
+  try {
+    // The greedy [\s\S]* may capture trailing newlines — trim to get clean JSON
+    const raw = match[1].trim();
+    const parsed = JSON.parse(raw);
+    if (!parsed.question || !Array.isArray(parsed.options) || !parsed.answer) return null;
+    // Sanitise the question: strip any fenced code blocks and option labels
+    // (A), B), 1., etc.) that the AI may have accidentally embedded in it.
+    let questionText = parsed.question
+      .replace(/```[\s\S]*?```/g, "")            // remove embedded fenced blocks
+      .replace(/^\s*[A-Z]\)\s*.*$/gm, "")        // remove "A) ...", "B) ..." lines
+      .replace(/^\s*[0-9]+\.\s*.*$/gm, "")       // remove "1. ...", "2. ..." lines
+      .trim();
+    // If the AI used the codeSnippet field, append it as a proper code block
+    const question = parsed.codeSnippet
+      ? `${questionText}\n\`\`\`python\n${parsed.codeSnippet}\n\`\`\``
+      : questionText;
+    // Normalise options: strip surrounding backticks if AI wrapped them anyway,
+    // so we always store plain strings (newlines are preserved via JSON \n).
+    const options = parsed.options.map((o) =>
+      typeof o === "string" ? o.replace(/^`([\s\S]*)`$/, "$1") : String(o)
+    );
+    return {
+      title: parsed.title || "",
+      question,
+      options,
+      answer: parsed.answer,
+      explanation: parsed.explanation || "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSaQuestion(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (!raw.question || !raw.answer) return null;
+  return {
+    title: raw.title || "",
+    question: raw.question,
+    answer: raw.answer,
+    gradingCriteria: raw.gradingCriteria || "",
+  };
+}
+
+function parseSaFromMessage(content) {
+  const match = content.match(/```sa-json\s*\n([\s\S]*?)```/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    const questions = Array.isArray(parsed?.questions)
+      ? parsed.questions.map(normalizeSaQuestion).filter(Boolean)
+      : [normalizeSaQuestion(parsed)].filter(Boolean);
+    if (!questions.length) return null;
+    return {
+      questions,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parsePracticeFromMessage(content) {
+  const match = content.match(/```practice-json\s*\n([\s\S]*)\n```/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    if (!parsed.title || !parsed.instructions) return null;
+    return {
+      title: parsed.title || "",
+      body: parsed.body || "",
+      instructions: parsed.instructions || "",
+      hints: Array.isArray(parsed.hints) ? parsed.hints : [],
+      codeStarter: parsed.codeStarter || "",
+      modelAnswer: parsed.modelAnswer || "",
+      testMode: !!parsed.testMode,
+      testCases: Array.isArray(parsed.testCases) ? parsed.testCases : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseLessonPlanFromMessage(content) {
+  const match = content.match(/```lesson-plan-json\s*\n([\s\S]*)\n```/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    if (!parsed.planTitle || !Array.isArray(parsed.topics)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function parseLearningFromMessage(content) {
+  const match = content.match(/```learning-json\s*\n([\s\S]*)\n```/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    if (!parsed.title) return null;
+    return {
+      title: parsed.title || "",
+      body: parsed.body || "",
+      instructions: parsed.instructions || "",
+      hints: Array.isArray(parsed.hints) ? parsed.hints : [],
+      codeStarter: parsed.codeStarter || "",
+    };
+  } catch {
+    return null;
+  }
 }
 
 function mapLessonFromApi(lesson) {
@@ -118,6 +251,264 @@ function PageShell({ className, children }) {
   return <div className={className}>{children}</div>;
 }
 
+function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE, onSaved, setToast }) {
+  const hasContent = !!(meta.practiceBody || meta.practiceCodeStarter);
+  const hints = Array.isArray(meta.practiceHints) ? meta.practiceHints : [];
+  const hasExercise = !!(meta.practiceInstructions);
+
+  // Edit-mode state
+  const [editing, setEditing] = useState(!hasContent && isTeacher);
+  const [body, setBody] = useState(meta.practiceBody || "");
+  const [instructions, setInstructions] = useState(meta.practiceInstructions || "");
+  const [codeStarter, setCodeStarter] = useState(meta.practiceCodeStarter || "");
+  const [saving, setSaving] = useState(false);
+
+  // Hints reveal state
+  const [hintsRevealed, setHintsRevealed] = useState(0); // number of hints shown
+
+  // Mini code editor + console state
+  const miniInitialCode = meta.practiceCodeStarter || "# Write your Python code here\n";
+  const [miniOutput, setMiniOutput] = useState(null); // null = not run yet
+  const [miniRunning, setMiniRunning] = useState(false);
+  const [miniError, setMiniError] = useState(false);
+  const miniEditorHostRef = useRef(null);
+  const miniEditorRef = useRef(null);
+
+  // Initialize Ace editor in the mini host div
+  useEffect(() => {
+    function mountAce(retries = 0) {
+      if (!window.ace || !miniEditorHostRef.current) {
+        if (retries < 20) setTimeout(() => mountAce(retries + 1), 150);
+        return;
+      }
+      if (miniEditorRef.current) return; // already mounted
+      const editor = window.ace.edit(miniEditorHostRef.current);
+      editor.setTheme("ace/theme/monokai");
+      editor.session.setMode("ace/mode/python");
+      editor.setValue(miniInitialCode, -1); // -1 = move cursor to start
+      editor.setOptions({
+        fontSize: "13px",
+        showPrintMargin: false,
+        tabSize: 4,
+        useSoftTabs: true,
+        wrap: true,
+        enableBasicAutocompletion: false,
+        enableLiveAutocompletion: false,
+      });
+      miniEditorRef.current = editor;
+    }
+
+    mountAce();
+
+    return () => {
+      if (miniEditorRef.current) {
+        miniEditorRef.current.destroy();
+        miniEditorRef.current = null;
+      }
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function skRead(x) {
+    if (window.Sk?.builtinFiles?.files?.[x] === undefined) throw new Error(`File not found: '${x}'`);
+    return window.Sk.builtinFiles.files[x];
+  }
+
+  async function runMiniCode() {
+    if (!window.Sk) { setMiniOutput("Python runner not available yet. Please wait a moment."); setMiniError(true); return; }
+    const code = miniEditorRef.current ? miniEditorRef.current.getValue() : miniInitialCode;
+    setMiniRunning(true);
+    setMiniError(false);
+    let output = "";
+    try {
+      if (window.Sk?.builtin?.dict) window.Sk.sysmodules = new window.Sk.builtin.dict([]);
+      window.Sk.globals = {};
+      window.Sk.configure({ output: (t) => { output += t; }, read: skRead, inputfunTakesPrompt: true });
+      await window.Sk.misceval.asyncToPromise(() =>
+        window.Sk.importMainWithBody("<stdin>", false, code, true)
+      );
+      setMiniOutput(output || "(no output)");
+      setMiniError(false);
+    } catch (err) {
+      setMiniOutput(String(err));
+      setMiniError(true);
+    } finally {
+      setMiniRunning(false);
+    }
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/topics/${meta.topic?.id}/items/${meta.id}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({
+            title: meta.title,
+            type: "learning",
+            practiceBody: body,
+            practiceInstructions: instructions,
+            practiceCodeStarter: codeStarter,
+          }),
+        }
+      );
+      if (res.ok) {
+        onSaved({ practiceBody: body, practiceInstructions: instructions, practiceCodeStarter: codeStarter });
+        setEditing(false);
+        setToast({ type: "success", message: "Lesson content saved!" });
+      } else {
+        setToast({ type: "error", message: "Failed to save content." });
+      }
+    } catch {
+      setToast({ type: "error", message: "Server not reachable." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="learning-viewer">
+      {meta.topic?.title && (
+        <p className="learning-topic-label">{meta.topic.title}</p>
+      )}
+
+      {isTeacher && editing ? (
+        /* ── Teacher edit form ───────────────────────────── */
+        <div className="learning-edit-inline">
+          <label className="learning-edit-label">Lesson Body</label>
+          <textarea
+            className="learning-edit-textarea"
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder="Explain the concept in plain language (K-12 friendly)…"
+            rows={8}
+          />
+          <label className="learning-edit-label">Try-it Instructions (optional)</label>
+          <input
+            className="learning-edit-input"
+            value={instructions}
+            onChange={(e) => setInstructions(e.target.value)}
+            placeholder="e.g. Try writing a while loop that prints 1 to 10."
+          />
+          <label className="learning-edit-label">Starter Code for the mini editor (optional)</label>
+          <textarea
+            className="learning-edit-code"
+            value={codeStarter}
+            onChange={(e) => setCodeStarter(e.target.value)}
+            placeholder="# Starter code shown in the student editor"
+            rows={4}
+            spellCheck={false}
+          />
+          <div className="learning-edit-actions">
+            <button className="primary-button" onClick={handleSave} disabled={saving}>
+              {saving ? "Saving…" : "Save Content"}
+            </button>
+            {hasContent && (
+              <button className="ghost-button" onClick={() => setEditing(false)}>Cancel</button>
+            )}
+          </div>
+        </div>
+      ) : (
+        /* ── View mode ───────────────────────────────────── */
+        <>
+          {!hasContent ? (
+            <div className="learning-empty-state">
+              <p>No content has been added to this lesson yet.</p>
+              {isTeacher && (
+                <button className="ghost-button" onClick={() => setEditing(true)}>+ Add Content</button>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* Main lesson body */}
+              {meta.practiceBody && (
+                <div className="learning-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                    {meta.practiceBody}
+                  </ReactMarkdown>
+                </div>
+              )}
+
+              {/* Try-it exercise section */}
+              {hasExercise && (
+                <div className="learning-exercise">
+                  <div className="learning-exercise-header">
+                    <span className="learning-exercise-badge">Try it!</span>
+                    <p className="learning-exercise-task">{meta.practiceInstructions}</p>
+                  </div>
+
+                  {/* Hints */}
+                  {hints.length > 0 && (
+                    <div className="learning-hints-wrap">
+                      {hints.slice(0, hintsRevealed).map((h, i) => (
+                        <div key={i} className="learning-hint-item">
+                          <span className="learning-hint-num">Hint {i + 1}</span>
+                          <span>{h}</span>
+                        </div>
+                      ))}
+                      {hintsRevealed < hints.length && (
+                        <button
+                          className="ghost-button learning-hint-btn"
+                          onClick={() => setHintsRevealed((n) => n + 1)}
+                        >
+                          {hintsRevealed === 0 ? "Show Hint" : "Show Next Hint"}
+                        </button>
+                      )}
+                      {hintsRevealed >= hints.length && hints.length > 0 && (
+                        <button
+                          className="ghost-button learning-hint-btn"
+                          onClick={() => setHintsRevealed(0)}
+                        >
+                          Hide Hints
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Mini code editor */}
+                  <div className="mini-editor-wrap">
+                    <div className="mini-editor-topbar">
+                      <span className="mini-editor-label">Python Editor</span>
+                      <button
+                        className="run-pill"
+                        onClick={runMiniCode}
+                        disabled={miniRunning}
+                        type="button"
+                      >
+                        {miniRunning ? "Running…" : "▶ Run"}
+                      </button>
+                    </div>
+                    <div ref={miniEditorHostRef} className="mini-ace-host" />
+                    {miniOutput !== null && (
+                      <div className={`mini-console ${miniError ? "mini-console-error" : ""}`}>
+                        <span className="mini-console-label">Output</span>
+                        <pre>{miniOutput}</pre>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Teacher-only Edit button */}
+              {isTeacher && (
+                <button className="ghost-button learning-edit-btn" onClick={() => {
+                  setBody(meta.practiceBody || "");
+                  setInstructions(meta.practiceInstructions || "");
+                  setCodeStarter(meta.practiceCodeStarter || "");
+                  setEditing(true);
+                }}>
+                  Edit Content
+                </button>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [authMode, setAuthMode] = useState("login");
@@ -161,6 +552,9 @@ export default function App() {
   const [editingItemId, setEditingItemId] = useState(null);
   const [editingItemTitle, setEditingItemTitle] = useState("");
   const [editingItemType, setEditingItemType] = useState("learning");
+  const [editingItemBody, setEditingItemBody] = useState("");
+  const [editingItemInstructions, setEditingItemInstructions] = useState("");
+  const [editingItemCodeStarter, setEditingItemCodeStarter] = useState("");
   const [editingItemQuizSubtype, setEditingItemQuizSubtype] = useState("mcq");
   const [editingItemQuizQuestion, setEditingItemQuizQuestion] = useState("");
   const [editingItemQuizOptions, setEditingItemQuizOptions] = useState([]);
@@ -171,14 +565,64 @@ export default function App() {
   const [practiceError, setPracticeError] = useState("");
   const [quizMeta, setQuizMeta] = useState(null);
   const [quizError, setQuizError] = useState("");
+  const [learningMeta, setLearningMeta] = useState(null);
+  const [learningError, setLearningError] = useState("");
   const [quizLoading, setQuizLoading] = useState(false);
   const [quizResponse, setQuizResponse] = useState("");
   const [quizAttempt, setQuizAttempt] = useState(null);
   const [quizSubmitting, setQuizSubmitting] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatExpanded, setChatExpanded] = useState(false);
+  const [chatAnimDir, setChatAnimDir] = useState(null); // "expanding" | "collapsing" | "fadein" | null
+  const [fabPos, setFabPos] = useState({ right: 24, bottom: 24 });
+  const fabDraggingRef = useRef(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState("");
+  const [copiedMsgIdx, setCopiedMsgIdx] = useState(null);
+  const [importMcq, setImportMcq] = useState(null);
+  const [importMcqTopicId, setImportMcqTopicId] = useState("");
+  const [importMcqTitle, setImportMcqTitle] = useState("");
+  const [importMcqSaving, setImportMcqSaving] = useState(false);
+  const [importMcqError, setImportMcqError] = useState("");
+  const [importMcqNewTopic, setImportMcqNewTopic] = useState("");
+  const [importSa, setImportSa] = useState(null);
+  const [importSaTopicId, setImportSaTopicId] = useState("");
+  const [importSaSaving, setImportSaSaving] = useState(false);
+  const [importSaError, setImportSaError] = useState("");
+  const [importSaNewTopic, setImportSaNewTopic] = useState("");
+  const [importPractice, setImportPractice] = useState(null);
+  const [importPracticeTopicId, setImportPracticeTopicId] = useState("");
+  const [importPracticeNewTopic, setImportPracticeNewTopic] = useState("");
+  const [importPracticeSaving, setImportPracticeSaving] = useState(false);
+  const [importPracticeError, setImportPracticeError] = useState("");
+  const [importPlan, setImportPlan] = useState(null);
+  const [importPlanSaving, setImportPlanSaving] = useState(false);
+  const [importPlanError, setImportPlanError] = useState("");
+  const [importLearning, setImportLearning] = useState(null);
+  const [importLearningTopicId, setImportLearningTopicId] = useState("");
+  const [importLearningNewTopic, setImportLearningNewTopic] = useState("");
+  const [importLearningSaving, setImportLearningSaving] = useState(false);
+  const [importLearningError, setImportLearningError] = useState("");
+  const [testResults, setTestResults] = useState(null);
+  const [testRunning, setTestRunning] = useState(false);
+  const [errorExplanation, setErrorExplanation] = useState(null);
+  const [errorExplaining, setErrorExplaining] = useState(false);
+  const [dragOverItemId, setDragOverItemId] = useState(null);
+  const dragItemRef = useRef(null);
+  const dragFromHandleRef = useRef(false); // true only when drag started from the ⠿ handle
+  const [dragOverTopicId, setDragOverTopicId] = useState(null);
+  const dragTopicRef = useRef(null);
+  const dragTopicFromHandleRef = useRef(false);
+
   const [pageTransition, setPageTransition] = useState("page-enter");
   const [practiceDraft, setPracticeDraft] = useState(() => ({
     id: createLessonId(),
     ...initialLesson,
+    modelAnswer: "",
+    testMode: false,
+    testCases: [],
   }));
 
 
@@ -459,6 +903,11 @@ export default function App() {
       setActiveLessonId(null);
       return;
     }
+    if (route.page === "learn") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(null);
+      return;
+    }
     if (route.page === "student") {
       setActiveClassId(route.classId);
       setActiveLessonId(null);
@@ -490,7 +939,7 @@ export default function App() {
         setProgress(apiProgress);
 
         if (apiProgress?.lastCode && editorRef.current?.setValue) {
-          editorRef.current.setValue(apiProgress.lastCode);
+          editorRef.current.setValue(apiProgress.lastCode, -1);
           codeStarterRef.current = apiProgress.lastCode;
         }
       } catch {
@@ -525,10 +974,27 @@ export default function App() {
           setPracticeMeta(null);
           return;
         }
+        const item = data?.data?.item;
         setPracticeMeta({
-          itemTitle: data?.data?.item?.title || "Practice Item",
-          topicTitle: data?.data?.item?.topic?.title || "Practice",
+          itemTitle: item?.title || "Practice Item",
+          topicTitle: item?.topic?.title || "Practice",
         });
+        setPracticeDraft((prev) => ({
+          ...prev,
+          unit: item?.topic?.title || prev.unit,
+          heading: item?.title || prev.heading,
+          body: item?.practiceBody ?? prev.body,
+          instructions: item?.practiceInstructions ?? prev.instructions,
+          question: item?.practiceQuestion ?? prev.question,
+          hints: item?.practiceHints?.length ? item.practiceHints : prev.hints,
+          codeStarter: item?.practiceCodeStarter ?? prev.codeStarter,
+          modelAnswer: item?.practiceModelAnswer ?? prev.modelAnswer,
+          testMode: item?.practiceTestMode ?? prev.testMode,
+          testCases: item?.practiceTestCases ?? prev.testCases,
+          _itemId: item?.id || route.itemId,
+          _topicId: item?.topic?.id || "",
+        }));
+        setTestResults(null);
       } catch {
         if (cancelled) return;
         setPracticeError("Unable to load practice.");
@@ -591,6 +1057,39 @@ export default function App() {
   }, [user, route.page, route.itemId, activeClassId]);
 
   useEffect(() => {
+    if (!user || route.page !== "learn" || !route.itemId || !activeClassId) {
+      setLearningMeta(null);
+      setLearningError("");
+      return;
+    }
+    let cancelled = false;
+
+    async function fetchLearning() {
+      try {
+        const res = await fetch(
+          `${API_BASE}/classes/${activeClassId}/learn/${route.itemId}`,
+          { headers: { ...authHeaders() } }
+        );
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok) {
+          setLearningError(data?.error?.message || "Unable to load lesson.");
+          setLearningMeta(null);
+          return;
+        }
+        setLearningMeta(data?.data?.item || null);
+      } catch {
+        if (cancelled) return;
+        setLearningError("Unable to load lesson.");
+        setLearningMeta(null);
+      }
+    }
+
+    fetchLearning();
+    return () => { cancelled = true; };
+  }, [user, route.page, route.itemId, activeClassId]);
+
+  useEffect(() => {
     if (!user) return;
     if (user.role === "teacher") {
       setViewRole("teacher");
@@ -625,8 +1124,6 @@ export default function App() {
     if (!isLessonRoute || !activeClassId) return;
     let editor;
     let currentTheme = "vs-dark";
-    let fallbackTimer;
-    let fallbackTextarea;
 
     const outputEl = document.getElementById("output");
     const runBtn = document.getElementById("run-btn");
@@ -709,10 +1206,9 @@ export default function App() {
         return;
       }
       outputEl.textContent = "";
-      const code =
-        typeof editor.getValue === "function"
-          ? editor.getValue()
-          : editor.getModel?.()?.getValue?.() ?? "";
+      setErrorExplanation(null);
+      setErrorExplaining(false);
+      const code = editor.getValue();
       if (!code) {
         outputEl.textContent = "Editor has no code loaded yet.";
         return;
@@ -739,149 +1235,58 @@ export default function App() {
           }
         })
         .catch((err) => {
-          appendText(`\nError: ${err.toString()}`);
+          const errStr = err.toString();
+          appendText(`\nError: ${errStr}`);
           clearInlineInput();
+          setErrorExplanation(null);
+          setErrorExplaining(true);
+          fetch(`${API_BASE}/chat/explain-error`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ errorMessage: errStr, code: editor?.getValue() || "" }),
+          })
+            .then((r) => r.json())
+            .then((data) => setErrorExplanation(data?.data?.explanation || null))
+            .catch(() => setErrorExplanation(null))
+            .finally(() => setErrorExplaining(false));
         });
     }
 
     runBtn.addEventListener("click", runCode);
 
-    function attachFallbackEditor() {
-      if (editor || fallbackTextarea) return;
-      fallbackTextarea = document.createElement("textarea");
-      fallbackTextarea.className = "editor-fallback";
-      fallbackTextarea.spellcheck = false;
-      fallbackTextarea.value = codeStarterRef.current;
-      editorHost.appendChild(fallbackTextarea);
-      editor = {
-        getValue: () => fallbackTextarea.value,
-        dispose: () => {},
-      };
-      editorRef.current = editor;
-    }
-
-    function initMonaco(retries = 0) {
-      if (!window.require) {
-        if (retries < 20) {
-          setTimeout(() => initMonaco(retries + 1), 150);
-        } else {
-          attachFallbackEditor();
-        }
+    function tryInitAce(retries = 0) {
+      if (!window.ace || !editorHost) {
+        if (retries < 20) setTimeout(() => tryInitAce(retries + 1), 150);
         return;
       }
-
-      window.require.config({
-        paths: {
-          vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min/vs",
-        },
+      editor = window.ace.edit(editorHost);
+      editor.setTheme("ace/theme/monokai");
+      editor.session.setMode("ace/mode/python");
+      editor.setValue(codeStarterRef.current || "", -1);
+      editor.setOptions({
+        fontSize: "14px",
+        showPrintMargin: false,
+        tabSize: 4,
+        useSoftTabs: true,
+        enableBasicAutocompletion: true,
+        enableLiveAutocompletion: false,
+        wrap: true,
       });
-
-      window.require(["vs/editor/editor.main"], () => {
-        if (fallbackTextarea) {
-          fallbackTextarea.remove();
-          fallbackTextarea = null;
-        }
-        if (!window.monaco) {
-          attachFallbackEditor();
-          return;
-        }
-        editorHost.innerHTML = "";
-        editor = window.monaco.editor.create(editorHost, {
-          value: codeStarterRef.current,
-          language: "python",
-          theme: "vs-dark",
-          automaticLayout: true,
-          minimap: { enabled: false },
-          fontSize: 14,
-          roundedSelection: true,
-          scrollBeyondLastLine: false,
-          wordWrap: "on",
-          lineNumbers: "on",
-          glyphMargin: true,
-          quickSuggestions: { other: true, comments: false, strings: true },
-          suggestOnTriggerCharacters: true,
-          readOnly: false,
-        });
-        editorRef.current = editor;
-        editor.focus();
-
-        if (
-          !window.monaco.languages
-            .getLanguages()
-            .some((lang) => lang.id === "python")
-        ) {
-          window.monaco.languages.register({ id: "python" });
-        }
-
-        editor.addCommand(
-          window.monaco.KeyMod.CtrlCmd | window.monaco.KeyCode.Enter,
-          runCode
-        );
-
-        const keywords = [
-          {
-            label: "print",
-            kind: window.monaco.languages.CompletionItemKind.Function,
-            insertText: "print(${1:object})",
-            insertTextRules:
-              window.monaco.languages.CompletionItemInsertTextRule
-                .InsertAsSnippet,
-            documentation: "Print object to standard output.",
-          },
-          {
-            label: "for",
-            kind: window.monaco.languages.CompletionItemKind.Keyword,
-            insertText: "for ${1:i} in ${2:range(10)}:\n\t$0",
-            insertTextRules:
-              window.monaco.languages.CompletionItemInsertTextRule
-                .InsertAsSnippet,
-            documentation: "For loop.",
-          },
-          {
-            label: "if",
-            kind: window.monaco.languages.CompletionItemKind.Keyword,
-            insertText: "if ${1:condition}:\n\t$0",
-            insertTextRules:
-              window.monaco.languages.CompletionItemInsertTextRule
-                .InsertAsSnippet,
-            documentation: "If statement.",
-          },
-          {
-            label: "def",
-            kind: window.monaco.languages.CompletionItemKind.Keyword,
-            insertText: "def ${1:func_name}(${2:args}):\n\t$0",
-            insertTextRules:
-              window.monaco.languages.CompletionItemInsertTextRule
-                .InsertAsSnippet,
-            documentation: "Define a function.",
-          },
-          {
-            label: "class",
-            kind: window.monaco.languages.CompletionItemKind.Class,
-            insertText:
-              "class ${1:ClassName}:\n\tdef __init__(self, ${2:args}):\n\t\t$0",
-            insertTextRules:
-              window.monaco.languages.CompletionItemInsertTextRule
-                .InsertAsSnippet,
-            documentation: "Define a class.",
-          },
-        ];
-
-        window.monaco.languages.registerCompletionItemProvider("python", {
-          provideCompletionItems() {
-            return { suggestions: keywords };
-          },
-        });
+      editor.commands.addCommand({
+        name: "runCode",
+        bindKey: { win: "Ctrl-Enter", mac: "Command-Enter" },
+        exec: runCode,
       });
+      editorRef.current = editor;
+      editor.focus();
     }
 
-    initMonaco();
-    fallbackTimer = setTimeout(attachFallbackEditor, 2000);
+    tryInitAce();
 
     function toggleTheme() {
       if (currentTheme === "vs-dark") {
         currentTheme = "vs";
-        window.monaco?.editor.setTheme("vs");
+        editor?.setTheme("ace/theme/chrome");
         themeBtn.textContent = "Switch to Dark";
         document.body.style.background = "#ffffff";
         document.body.style.color = "#000000";
@@ -889,7 +1294,7 @@ export default function App() {
         outputEl.style.color = "#000000";
       } else {
         currentTheme = "vs-dark";
-        window.monaco?.editor.setTheme("vs-dark");
+        editor?.setTheme("ace/theme/monokai");
         themeBtn.textContent = "Switch to Light";
         document.body.style.background = "#1e1e1e";
         document.body.style.color = "#dddddd";
@@ -903,19 +1308,19 @@ export default function App() {
     return () => {
       runBtn.removeEventListener("click", runCode);
       themeBtn.removeEventListener("click", toggleTheme);
-      if (fallbackTimer) {
-        clearTimeout(fallbackTimer);
-      }
-      editor?.dispose();
+      editor?.destroy();
     };
   }, [user, isLessonRoute, viewRole, activeClassId, route.page]);
 
   useEffect(() => {
     codeStarterRef.current = lesson.codeStarter;
-    if (viewRole === "teacher" && editorRef.current?.setValue) {
-      editorRef.current.setValue(lesson.codeStarter);
+    // On the practice page load the code starter for both teacher and student.
+    // On regular lesson pages only sync for the teacher (students keep their own code).
+    const shouldSync = viewRole === "teacher" || route.page === "practice";
+    if (shouldSync && editorRef.current?.setValue) {
+      editorRef.current.setValue(lesson.codeStarter || "", -1);
     }
-  }, [lesson.codeStarter, viewRole]);
+  }, [lesson.codeStarter, viewRole, route.page]);
 
   function updateActiveLesson(updater) {
     if (route.page === "practice") {
@@ -963,12 +1368,9 @@ export default function App() {
     setRoute({ page: "quiz", classId, itemId, lessonId: null, studentId: null });
   }
 
-  function handleSelectLesson(id) {
-    if (!activeClassId) return;
-    navigateToLesson(activeClassId, id);
-    if (user?.role === "teacher") {
-      setViewRole("teacher");
-    }
+  function navigateToLearningItem(classId, itemId) {
+    window.history.pushState({}, "", `/classes/${classId}/learn/${itemId}`);
+    setRoute({ page: "learn", classId, itemId, lessonId: null, studentId: null });
   }
 
   function handleSelectClass(id) {
@@ -1068,40 +1470,6 @@ export default function App() {
       navigateToClasses();
     } catch {
       setClassError("Class server not reachable.");
-    }
-  }
-
-  async function handleDeleteLesson(lessonId) {
-    if (!lessonId) return;
-    if (!window.confirm("Delete this lesson?")) return;
-    if (!isMongoObjectId(lessonId)) {
-      setLessons((prev) => {
-        const next = prev.filter((item) => item.id !== lessonId);
-        if (activeLessonId === lessonId) {
-          setActiveLessonId(next[0]?.id || null);
-        }
-        return next;
-      });
-      return;
-    }
-    try {
-      const res = await fetch(`${API_BASE}/lessons/${lessonId}`, {
-        method: "DELETE",
-        headers: { ...authHeaders() },
-      });
-      if (!res.ok) {
-        setToast({ type: "error", message: "Lesson delete failed" });
-        return;
-      }
-      setLessons((prev) => {
-        const next = prev.filter((item) => item.id !== lessonId);
-        if (activeLessonId === lessonId) {
-          setActiveLessonId(next[0]?.id || null);
-        }
-        return next;
-      });
-    } catch {
-      setToast({ type: "error", message: "Lesson delete failed" });
     }
   }
 
@@ -1289,6 +1657,9 @@ export default function App() {
     setEditingItemId(item.id);
     setEditingItemTitle(item.title);
     setEditingItemType(item.type);
+    setEditingItemBody(item.practiceBody || "");
+    setEditingItemInstructions(item.practiceInstructions || "");
+    setEditingItemCodeStarter(item.practiceCodeStarter || "");
     setEditingItemQuizSubtype(item.quizSubtype || "mcq");
     setEditingItemQuizQuestion(item.quizQuestion || "");
     setEditingItemQuizOptions(Array.isArray(item.quizOptions) ? item.quizOptions : []);
@@ -1323,6 +1694,11 @@ export default function App() {
       title: editingItemTitle.trim(),
       type: editingItemType,
     };
+    if (editingItemType === "learning") {
+      payload.practiceBody         = editingItemBody;
+      payload.practiceInstructions = editingItemInstructions;
+      payload.practiceCodeStarter  = editingItemCodeStarter;
+    }
     if (editingItemType === "quiz") {
       payload.quizSubtype = editingItemQuizSubtype;
       payload.quizQuestion = editingItemQuizQuestion.trim();
@@ -1364,6 +1740,9 @@ export default function App() {
       setEditingItemId(null);
       setEditingItemTitle("");
       setEditingItemType("learning");
+      setEditingItemBody("");
+      setEditingItemInstructions("");
+      setEditingItemCodeStarter("");
       setEditingItemQuizSubtype("mcq");
       setEditingItemQuizQuestion("");
       setEditingItemQuizOptions([]);
@@ -1373,6 +1752,73 @@ export default function App() {
       setTopicError("");
     } catch {
       setTopicError("Item server not reachable.");
+    }
+  }
+
+  async function handleItemReorder(topicId, draggedId, targetId) {
+    if (draggedId === targetId) return;
+
+    // Compute reordered list upfront from current state snapshot (don't rely on
+    // setState updater being called synchronously in React 18 batching mode).
+    const currentTopic = topics.find((t) => t.id === topicId);
+    if (!currentTopic) return;
+    const items = [...(currentTopic.items || [])];
+    const fromIdx = items.findIndex((i) => i.id === draggedId);
+    const toIdx = items.findIndex((i) => i.id === targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    const [moved] = items.splice(fromIdx, 1);
+    items.splice(toIdx, 0, moved);
+
+    // Optimistic UI update
+    setTopics((prev) =>
+      prev.map((t) => (t.id === topicId ? { ...t, items } : t))
+    );
+
+    // Persist to backend
+    try {
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items/reorder`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ itemIds: items.map((i) => i.id) }),
+        }
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        console.error("Reorder failed:", res.status, data);
+        setToast({ type: "error", message: `Reorder failed (${res.status}): ${data?.error?.message || "unknown error"}` });
+      }
+    } catch (err) {
+      console.error("Reorder network error:", err);
+      setToast({ type: "error", message: "Reorder failed: network error" });
+    }
+  }
+
+  async function handleTopicReorder(draggedId, targetId) {
+    if (draggedId === targetId) return;
+    const reordered = [...topics];
+    const fromIdx = reordered.findIndex((t) => t.id === draggedId);
+    const toIdx = reordered.findIndex((t) => t.id === targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx, 0, moved);
+
+    setTopics(reordered);
+
+    try {
+      const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics/reorder`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ topicIds: reordered.map((t) => t.id) }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setToast({ type: "error", message: `Reorder failed (${res.status}): ${data?.error?.message || "unknown error"}` });
+      }
+    } catch (err) {
+      console.error("Topic reorder network error:", err);
+      setToast({ type: "error", message: "Reorder failed: network error" });
     }
   }
 
@@ -1545,6 +1991,49 @@ export default function App() {
     }
   }
 
+  async function runTestCases() {
+    if (!window.Sk) return;
+    const code = editorRef.current?.getValue?.() || "";
+    if (!code.trim()) return;
+    const cases = practiceDraft.testCases || [];
+    if (!cases.length) return;
+    setTestRunning(true);
+    setTestResults(null);
+    const results = [];
+    for (const tc of cases) {
+      const inputQueue = (tc.input || "").split("\n").map((s) => s.trim());
+      let inputIdx = 0;
+      let actualOutput = "";
+      if (window.Sk?.builtin?.dict) window.Sk.sysmodules = new window.Sk.builtin.dict([]);
+      window.Sk.globals = {};
+      window.Sk.configure({
+        output: (text) => { actualOutput += text; },
+        read: (x) => {
+          if (window.Sk?.builtinFiles?.files?.[x] === undefined) throw new Error(`File not found: '${x}'`);
+          return window.Sk.builtinFiles.files[x];
+        },
+        inputfun: () => Promise.resolve(inputQueue[inputIdx++] || ""),
+        inputfunTakesPrompt: true,
+      });
+      try {
+        await window.Sk.misceval.asyncToPromise(() =>
+          window.Sk.importMainWithBody("<stdin>", false, code, true)
+        );
+        const actual   = actualOutput.trim();
+        const expected = (tc.expectedOutput || "").trim();
+        results.push({ label: tc.label, input: tc.input, expected, actual, passed: actual === expected });
+      } catch (err) {
+        results.push({
+          label: tc.label, input: tc.input,
+          expected: (tc.expectedOutput || "").trim(),
+          actual: `Error: ${err.toString()}`, passed: false,
+        });
+      }
+    }
+    setTestResults(results);
+    setTestRunning(false);
+  }
+
   async function submitLesson() {
     const lessonId = activeLessonIdRef.current;
     if (!user || !lessonId || !isMongoObjectId(lessonId)) return;
@@ -1646,7 +2135,1336 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [toast]);
 
+  const chatMessagesEndRef = useRef(null);
+
+  useEffect(() => {
+    if (chatMessagesEndRef.current) {
+      chatMessagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [chatMessages]);
+
+  async function sendChatMessage() {
+    if (!chatInput.trim() || chatLoading) return;
+
+    const userMessage = { role: "user", content: chatInput.trim() };
+    const updatedMessages = [...chatMessages, userMessage];
+    setChatMessages(updatedMessages);
+    setChatInput("");
+    setChatLoading(true);
+    setChatError("");
+
+    // Build context from current app state
+    const context = {};
+    if (activeClassId) {
+      context.classId = activeClassId;
+      context.className = activeClass?.name || "";
+    }
+    if (activeLessonId) {
+      context.lessonId = activeLessonId;
+    }
+
+    // Get code from Monaco editor
+    if (editorRef.current) {
+      try {
+        context.studentCode = editorRef.current.getValue();
+      } catch {
+        // Editor not available
+      }
+    }
+
+    // Get console output
+    const outputEl = document.getElementById("output");
+    if (outputEl && outputEl.textContent) {
+      context.codeOutput = outputEl.textContent;
+    }
+
+    // Teacher: include topics list
+    if (user.role === "teacher" && topics.length > 0) {
+      context.topics = topics.map((t) => t.title).join(", ");
+    }
+
+    try {
+      const res = await fetch(API_BASE + "/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({
+          messages: updatedMessages.map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+          context,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err?.error?.message || "Chat request failed");
+      }
+
+      // Read SSE stream
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let assistantContent = "";
+
+      // Add empty assistant message to update incrementally
+      setChatMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const text = decoder.decode(value, { stream: true });
+        const lines = text.split("\n");
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.done) break;
+              if (data.error) throw new Error(data.error);
+              if (data.content) {
+                assistantContent += data.content;
+                setChatMessages((prev) => {
+                  const updated = [...prev];
+                  updated[updated.length - 1] = {
+                    role: "assistant",
+                    content: assistantContent,
+                  };
+                  return updated;
+                });
+              }
+            } catch (parseErr) {
+              if (parseErr.message && parseErr.message !== "Unexpected end of JSON input") {
+                throw parseErr;
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setChatError(err.message);
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
+  function clearChat() {
+    setChatMessages([]);
+    setChatError("");
+  }
+
+  async function handleImportMcqSave() {
+    if (!activeClassId || !importMcq) return;
+    setImportMcqError("");
+    if (!importMcqTitle.trim()) { setImportMcqError("Title is required."); return; }
+    if (!importMcq.question.trim()) { setImportMcqError("Question is required."); return; }
+    const validOptions = importMcq.options.filter(Boolean);
+    if (validOptions.length < 2) { setImportMcqError("Need at least 2 options."); return; }
+    if (!importMcq.answer) { setImportMcqError("Select the correct answer."); return; }
+
+    setImportMcqSaving(true);
+    let topicId = importMcqTopicId;
+
+    try {
+      if (topicId === "__new__") {
+        if (!importMcqNewTopic.trim()) {
+          setImportMcqError("Enter new topic title.");
+          setImportMcqSaving(false);
+          return;
+        }
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ title: importMcqNewTopic.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setImportMcqError(data?.error?.message || "Failed to create topic.");
+          setImportMcqSaving(false);
+          return;
+        }
+        const created = data?.data?.topic;
+        topicId = created.id || created._id;
+        setTopics((prev) => [created, ...prev]);
+      }
+
+      // Map letter answer (A/B/C/D) to the full option text for auto-grading compatibility
+      const answerIndex = "ABCDEFGHIJ".indexOf(importMcq.answer.toUpperCase());
+      const quizAnswer = answerIndex >= 0 && answerIndex < validOptions.length
+        ? validOptions[answerIndex]
+        : importMcq.answer;
+
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({
+            title: importMcqTitle.trim(),
+            type: "quiz",
+            quizSubtype: "mcq",
+            quizQuestion: importMcq.question.trim(),
+            quizOptions: validOptions,
+            quizAnswer,
+          }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setImportMcqError(data?.error?.message || "Failed to save quiz.");
+        setImportMcqSaving(false);
+        return;
+      }
+      const item = data?.data?.item;
+      if (item) {
+        setTopics((prev) =>
+          prev.map((topic) =>
+            topic.id === topicId
+              ? { ...topic, items: [...(topic.items || []), item].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)) }
+              : topic
+          )
+        );
+      }
+      setImportMcq(null);
+      setToast({ type: "success", message: "MCQ imported as quiz!" });
+    } catch {
+      setImportMcqError("Server not reachable.");
+    } finally {
+      setImportMcqSaving(false);
+    }
+  }
+
+  function renderImportMcqModal() {
+    if (!importMcq) return null;
+    return (
+      <div className="modal-overlay" onClick={() => setImportMcq(null)}>
+        <div className="modal-content mcq-modal" onClick={(e) => e.stopPropagation()}>
+
+          {/* Indigo header */}
+          <div className="mcq-modal-header">
+            <div>
+              <p className="mcq-modal-eyebrow">AI Generated</p>
+              <h3 className="mcq-modal-title">Import MCQ Question</h3>
+            </div>
+            <button type="button" className="mcq-modal-close" onClick={() => setImportMcq(null)}>✕</button>
+          </div>
+
+          <div className="mcq-modal-body">
+            {importMcqError && <p className="mcq-modal-error">{importMcqError}</p>}
+
+            <label>Question Title</label>
+            <input
+              value={importMcqTitle}
+              onChange={(e) => setImportMcqTitle(e.target.value)}
+              placeholder="Short label, e.g. Loop Basics"
+            />
+
+            <label>Question</label>
+            <textarea
+              value={importMcq.question}
+              onChange={(e) => setImportMcq({ ...importMcq, question: e.target.value })}
+              rows={3}
+            />
+
+            <label>
+              Options
+              <span className="mcq-label-hint"> — tap a badge to mark the correct answer</span>
+            </label>
+            {importMcq.options.length < 2 && (
+              <p className="mcq-warning">A quiz needs at least 2 options.</p>
+            )}
+            {importMcq.options.map((opt, idx) => {
+              const letter = String.fromCharCode(65 + idx);
+              const isCorrect = importMcq.answer === letter;
+              return (
+                <div key={idx} className={`mcq-option-row${isCorrect ? " mcq-option-correct" : ""}`}>
+                  <button
+                    type="button"
+                    className="mcq-letter-badge"
+                    title={isCorrect ? "Correct answer" : `Mark ${letter} as correct`}
+                    onClick={() => setImportMcq({ ...importMcq, answer: letter })}
+                  >
+                    {letter}
+                  </button>
+                  <input
+                    className="mcq-option-input"
+                    value={opt}
+                    placeholder={`Option ${letter}`}
+                    onChange={(e) => {
+                      const next = [...importMcq.options];
+                      next[idx] = e.target.value;
+                      setImportMcq({ ...importMcq, options: next });
+                    }}
+                  />
+                  {importMcq.options.length > 2 && (
+                    <button
+                      type="button"
+                      className="mcq-option-remove"
+                      title="Remove option"
+                      onClick={() => {
+                        const next = importMcq.options.filter((_, i) => i !== idx);
+                        const answerIdx = "ABCDEFGHIJ".indexOf(importMcq.answer);
+                        let newAnswer = importMcq.answer;
+                        if (idx === answerIdx) newAnswer = "A";
+                        else if (idx < answerIdx) newAnswer = String.fromCharCode(64 + answerIdx);
+                        setImportMcq({ ...importMcq, options: next, answer: newAnswer });
+                      }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            <button
+              type="button"
+              className="mcq-add-option"
+              onClick={() => setImportMcq({ ...importMcq, options: [...importMcq.options, ""] })}
+            >
+              + Add Option
+            </button>
+
+            {importMcq.explanation && (
+              <div className="mcq-explanation-callout">
+                <strong>Explanation:</strong> {importMcq.explanation}
+              </div>
+            )}
+
+            <label>Save to Topic</label>
+            <select
+              value={importMcqTopicId}
+              onChange={(e) => setImportMcqTopicId(e.target.value)}
+            >
+              {topics.map((t) => (
+                <option key={t.id} value={t.id}>{t.title}</option>
+              ))}
+              <option value="__new__">+ Create new topic...</option>
+            </select>
+            {importMcqTopicId === "__new__" && (
+              <input
+                placeholder="New topic title"
+                value={importMcqNewTopic}
+                onChange={(e) => setImportMcqNewTopic(e.target.value)}
+                style={{ marginTop: 6 }}
+              />
+            )}
+          </div>
+
+          <div className="mcq-modal-footer">
+            <button className="primary-button" disabled={importMcqSaving} onClick={handleImportMcqSave}>
+              {importMcqSaving ? "Saving..." : "Save Quiz"}
+            </button>
+            <button className="ghost-button" onClick={() => setImportMcq(null)}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  async function handleImportSaSave() {
+    if (!activeClassId || !importSa) return;
+    setImportSaError("");
+    const question = importSa.questions?.[0];
+    if (!question?.question?.trim()) { setImportSaError("Question text is required."); return; }
+    if (!question?.answer?.trim()) { setImportSaError("Expected answer is required."); return; }
+
+    setImportSaSaving(true);
+    let topicId = importSaTopicId;
+
+    try {
+      if (topicId === "__new__") {
+        if (!importSaNewTopic.trim()) {
+          setImportSaError("Enter new topic title.");
+          setImportSaSaving(false);
+          return;
+        }
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ title: importSaNewTopic.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setImportSaError(data?.error?.message || "Failed to create topic.");
+          setImportSaSaving(false);
+          return;
+        }
+        const created = data?.data?.topic;
+        topicId = created.id || created._id;
+        setTopics((prev) => [created, ...prev]);
+      }
+
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({
+            title: (question.title || "").trim() || question.question.trim().slice(0, 60),
+            type: "quiz",
+            quizSubtype: "short_answer",
+            quizQuestion: question.question.trim(),
+            quizAnswer: question.answer.trim(),
+          }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setImportSaError(data?.error?.message || "Failed to save quiz.");
+        setImportSaSaving(false);
+        return;
+      }
+      const item = data?.data?.item;
+      if (item) {
+        setTopics((prev) =>
+          prev.map((topic) =>
+            topic.id === topicId
+              ? { ...topic, items: [...(topic.items || []), item].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)) }
+              : topic
+          )
+        );
+      }
+      setImportSa(null);
+      setToast({ type: "success", message: "Short-answer question imported!" });
+    } catch {
+      setImportSaError("Server not reachable.");
+    } finally {
+      setImportSaSaving(false);
+    }
+  }
+
+  function renderImportSaModal() {
+    if (!importSa) return null;
+    const question = importSa.questions?.[0];
+    if (!question) return null;
+    return (
+      <div className="modal-overlay" onClick={() => setImportSa(null)}>
+        <div className="modal-content mcq-modal" onClick={(e) => e.stopPropagation()}>
+
+          {/* Indigo header */}
+          <div className="mcq-modal-header">
+            <div>
+              <p className="mcq-modal-eyebrow">AI Generated</p>
+              <h3 className="mcq-modal-title">Import Short Answer Question</h3>
+            </div>
+            <button type="button" className="mcq-modal-close" onClick={() => setImportSa(null)}>✕</button>
+          </div>
+
+          <div className="mcq-modal-body">
+            {importSaError && <p className="mcq-modal-error">{importSaError}</p>}
+
+            <label>Question Title</label>
+            <input
+              value={question.title || ""}
+              onChange={(e) => {
+                const next = [...(importSa.questions || [])];
+                next[0] = { ...question, title: e.target.value };
+                setImportSa({ ...importSa, questions: next });
+              }}
+              placeholder="Short label, e.g. Variable Types"
+            />
+
+            <label>Question</label>
+            <textarea
+              value={question.question || ""}
+              onChange={(e) => {
+                const next = [...(importSa.questions || [])];
+                next[0] = { ...question, question: e.target.value };
+                setImportSa({ ...importSa, questions: next });
+              }}
+              rows={3}
+            />
+
+            <label>Expected Answer</label>
+            <textarea
+              value={question.answer || ""}
+              onChange={(e) => {
+                const next = [...(importSa.questions || [])];
+                next[0] = { ...question, answer: e.target.value };
+                setImportSa({ ...importSa, questions: next });
+              }}
+              rows={2}
+            />
+
+            {question.gradingCriteria && (
+              <div className="mcq-explanation-callout">
+                <strong>Grading criteria:</strong> {question.gradingCriteria}
+              </div>
+            )}
+
+            <label>Save to Topic</label>
+            <select
+              value={importSaTopicId}
+              onChange={(e) => setImportSaTopicId(e.target.value)}
+            >
+              {topics.map((t) => (
+                <option key={t.id} value={t.id}>{t.title}</option>
+              ))}
+              <option value="__new__">+ Create new topic...</option>
+            </select>
+            {importSaTopicId === "__new__" && (
+              <input
+                placeholder="New topic title"
+                value={importSaNewTopic}
+                onChange={(e) => setImportSaNewTopic(e.target.value)}
+                style={{ marginTop: 6 }}
+              />
+            )}
+          </div>
+
+          <div className="mcq-modal-footer">
+            <button className="primary-button" disabled={importSaSaving} onClick={handleImportSaSave}>
+              {importSaSaving ? "Saving..." : "Save Quiz"}
+            </button>
+            <button className="ghost-button" onClick={() => setImportSa(null)}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  async function handleImportPracticeSave() {
+    if (!activeClassId || !importPractice) return;
+    setImportPracticeError("");
+    if (!importPractice.title.trim()) { setImportPracticeError("Title is required."); return; }
+    if (!importPractice.instructions.trim()) { setImportPracticeError("Instructions are required."); return; }
+
+    setImportPracticeSaving(true);
+    let topicId = importPracticeTopicId;
+
+    try {
+      if (topicId === "__new__") {
+        if (!importPracticeNewTopic.trim()) {
+          setImportPracticeError("Enter new topic title.");
+          setImportPracticeSaving(false);
+          return;
+        }
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ title: importPracticeNewTopic.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setImportPracticeError(data?.error?.message || "Failed to create topic.");
+          setImportPracticeSaving(false);
+          return;
+        }
+        const created = data?.data?.topic;
+        topicId = created.id || created._id;
+        setTopics((prev) => [created, ...prev]);
+      }
+
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({
+            title: importPractice.title.trim(),
+            type: "practice",
+            practiceBody: importPractice.body,
+            practiceInstructions: importPractice.instructions,
+            practiceHints: importPractice.hints,
+            practiceCodeStarter: importPractice.codeStarter,
+            practiceModelAnswer: importPractice.modelAnswer,
+            practiceTestMode: !!importPractice.testMode,
+            practiceTestCases: Array.isArray(importPractice.testCases) ? importPractice.testCases : [],
+          }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setImportPracticeError(data?.error?.message || "Failed to save exercise.");
+        setImportPracticeSaving(false);
+        return;
+      }
+      const item = data?.data?.item;
+      if (item) {
+        setTopics((prev) =>
+          prev.map((topic) =>
+            topic.id === topicId
+              ? { ...topic, items: [...(topic.items || []), item].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)) }
+              : topic
+          )
+        );
+      }
+      setImportPractice(null);
+      setToast({ type: "success", message: "Coding exercise imported!" });
+    } catch {
+      setImportPracticeError("Server not reachable.");
+    } finally {
+      setImportPracticeSaving(false);
+    }
+  }
+
+  function renderImportPracticeModal() {
+    if (!importPractice) return null;
+    return (
+      <div className="modal-overlay" onClick={() => setImportPractice(null)}>
+        <div className="modal-content mcq-modal" onClick={(e) => e.stopPropagation()}>
+
+          <div className="mcq-modal-header">
+            <div>
+              <p className="mcq-modal-eyebrow">AI Generated</p>
+              <h3 className="mcq-modal-title">Import Coding Exercise</h3>
+            </div>
+            <button type="button" className="mcq-modal-close" onClick={() => setImportPractice(null)}>✕</button>
+          </div>
+
+          <div className="mcq-modal-body">
+            {importPracticeError && <p className="mcq-modal-error">{importPracticeError}</p>}
+
+            <label>Exercise Title</label>
+            <input
+              value={importPractice.title}
+              onChange={(e) => setImportPractice({ ...importPractice, title: e.target.value })}
+              placeholder="Short label, e.g. For Loop Practice"
+            />
+
+            <label>Body / Theory</label>
+            <textarea
+              value={importPractice.body}
+              onChange={(e) => setImportPractice({ ...importPractice, body: e.target.value })}
+              rows={3}
+            />
+
+            <label>Instructions</label>
+            <textarea
+              value={importPractice.instructions}
+              onChange={(e) => setImportPractice({ ...importPractice, instructions: e.target.value })}
+              rows={2}
+            />
+
+            <label>Hints (one per line)</label>
+            <textarea
+              value={importPractice.hints.join("\n")}
+              onChange={(e) =>
+                setImportPractice({
+                  ...importPractice,
+                  hints: e.target.value.split("\n").map((h) => h.trim()).filter(Boolean),
+                })
+              }
+              rows={3}
+            />
+
+            <label>Code Starter</label>
+            <textarea
+              className="practice-modal-code"
+              value={importPractice.codeStarter}
+              onChange={(e) => setImportPractice({ ...importPractice, codeStarter: e.target.value })}
+              rows={4}
+              spellCheck={false}
+            />
+
+            <label>
+              Model Answer{" "}
+              <span className="teacher-only-badge">Teacher only</span>
+            </label>
+            <textarea
+              className="practice-modal-code"
+              value={importPractice.modelAnswer}
+              onChange={(e) => setImportPractice({ ...importPractice, modelAnswer: e.target.value })}
+              rows={4}
+              spellCheck={false}
+            />
+
+            <div className="import-test-cases-section">
+              <label className="test-cases-toggle" style={{ marginBottom: "0.5rem" }}>
+                <input
+                  type="checkbox"
+                  checked={!!importPractice.testMode}
+                  onChange={(e) => setImportPractice({ ...importPractice, testMode: e.target.checked })}
+                />
+                <span>LeetCode-style test cases</span>
+                {importPractice.testMode && importPractice.testCases?.length > 0 && (
+                  <span className="teacher-only-badge" style={{ marginLeft: 8 }}>
+                    {importPractice.testCases.length} AI-generated
+                  </span>
+                )}
+              </label>
+              {importPractice.testMode && (
+                <>
+                  {(importPractice.testCases || []).map((tc, i) => (
+                    <div key={i} className="import-test-case-row">
+                      <div className="import-test-case-header">
+                        <input
+                          placeholder={`Test ${i + 1} label`}
+                          value={tc.label || ""}
+                          onChange={(e) => {
+                            const next = [...importPractice.testCases];
+                            next[i] = { ...tc, label: e.target.value };
+                            setImportPractice({ ...importPractice, testCases: next });
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="test-case-remove"
+                          onClick={() => {
+                            const next = importPractice.testCases.filter((_, idx) => idx !== i);
+                            setImportPractice({ ...importPractice, testCases: next });
+                          }}
+                        >✕</button>
+                      </div>
+                      <div className="test-case-fields">
+                        <textarea
+                          className="test-case-input practice-modal-code"
+                          placeholder="Input (one value per line, leave empty if none)"
+                          value={tc.input || ""}
+                          rows={2}
+                          onChange={(e) => {
+                            const next = [...importPractice.testCases];
+                            next[i] = { ...tc, input: e.target.value };
+                            setImportPractice({ ...importPractice, testCases: next });
+                          }}
+                        />
+                        <textarea
+                          className="test-case-expected practice-modal-code"
+                          placeholder="Expected output"
+                          value={tc.expectedOutput || ""}
+                          rows={2}
+                          onChange={(e) => {
+                            const next = [...importPractice.testCases];
+                            next[i] = { ...tc, expectedOutput: e.target.value };
+                            setImportPractice({ ...importPractice, testCases: next });
+                          }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className="ghost-button test-case-add"
+                    onClick={() =>
+                      setImportPractice({
+                        ...importPractice,
+                        testCases: [...(importPractice.testCases || []), { label: "", input: "", expectedOutput: "" }],
+                      })
+                    }
+                  >
+                    + Add Test Case
+                  </button>
+                </>
+              )}
+            </div>
+
+            <label>Save to Topic</label>
+            <select
+              value={importPracticeTopicId}
+              onChange={(e) => setImportPracticeTopicId(e.target.value)}
+            >
+              {topics.map((t) => (
+                <option key={t.id} value={t.id}>{t.title}</option>
+              ))}
+              <option value="__new__">+ Create new topic...</option>
+            </select>
+            {importPracticeTopicId === "__new__" && (
+              <input
+                placeholder="New topic title"
+                value={importPracticeNewTopic}
+                onChange={(e) => setImportPracticeNewTopic(e.target.value)}
+                style={{ marginTop: 6 }}
+              />
+            )}
+          </div>
+
+          <div className="mcq-modal-footer">
+            <button className="primary-button" disabled={importPracticeSaving} onClick={handleImportPracticeSave}>
+              {importPracticeSaving ? "Saving..." : "Save Exercise"}
+            </button>
+            <button className="ghost-button" onClick={() => setImportPractice(null)}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  async function handleImportPlanSave() {
+    if (!activeClassId || !importPlan) return;
+    setImportPlanError("");
+    if (!importPlan.planTitle?.trim()) { setImportPlanError("Plan title is required."); return; }
+    if (!importPlan.topics?.length) { setImportPlanError("Plan has no topics."); return; }
+    setImportPlanSaving(true);
+    try {
+      for (const topic of importPlan.topics) {
+        const topicRes = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ title: topic.title }),
+        });
+        const topicData = await topicRes.json();
+        if (!topicRes.ok) { setImportPlanError(topicData?.error?.message || "Failed to create topic."); setImportPlanSaving(false); return; }
+        const createdTopic = topicData?.data?.topic;
+        const topicId = createdTopic?.id || createdTopic?._id;
+        setTopics((prev) => [...prev, createdTopic]);
+        for (const item of (topic.items || [])) {
+          const answerIndex = "ABCDEFGHIJ".indexOf((item.quizAnswer || "").toUpperCase());
+          const quizAnswer = item.quizSubtype === "mcq" && answerIndex >= 0 && Array.isArray(item.quizOptions) && answerIndex < item.quizOptions.length
+            ? item.quizOptions[answerIndex]
+            : item.quizAnswer || "";
+          const itemRes = await fetch(`${API_BASE}/classes/${activeClassId}/topics/${topicId}/items`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({
+              title: item.title || "Untitled",
+              type: item.type,
+              quizSubtype: item.quizSubtype || null,
+              quizQuestion: item.quizSubtype
+                ? (item.codeSnippet ? `${item.quizQuestion}\n\`\`\`python\n${item.codeSnippet}\n\`\`\`` : item.quizQuestion || "")
+                : undefined,
+              quizOptions: item.quizOptions || [],
+              quizAnswer,
+              practiceBody: item.body || "",
+              practiceInstructions: item.instructions || "",
+              practiceHints: Array.isArray(item.hints) ? item.hints : [],
+              practiceCodeStarter: item.codeStarter || "",
+              practiceModelAnswer: item.modelAnswer || "",
+              practiceTestMode: !!item.testMode,
+              practiceTestCases: Array.isArray(item.testCases) ? item.testCases : [],
+            }),
+          });
+          const itemData = await itemRes.json();
+          if (itemRes.ok && itemData?.data?.item) {
+            setTopics((prev) =>
+              prev.map((t) =>
+                (t.id === topicId || t._id?.toString() === topicId)
+                  ? { ...t, items: [...(t.items || []), itemData.data.item] }
+                  : t
+              )
+            );
+          }
+        }
+      }
+      setImportPlan(null);
+      setToast({ type: "success", message: "Lesson plan imported!" });
+    } catch {
+      setImportPlanError("Server not reachable.");
+    } finally {
+      setImportPlanSaving(false);
+    }
+  }
+
+  function renderImportPlanModal() {
+    if (!importPlan) return null;
+    return (
+      <div className="modal-overlay" onClick={() => setImportPlan(null)}>
+        <div className="modal-content mcq-modal plan-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="mcq-modal-header">
+            <div>
+              <p className="mcq-modal-eyebrow">AI Generated</p>
+              <h3 className="mcq-modal-title">Import Lesson Plan</h3>
+            </div>
+            <button type="button" className="mcq-modal-close" onClick={() => setImportPlan(null)}>✕</button>
+          </div>
+          <div className="mcq-modal-body">
+            {importPlanError && <p className="mcq-modal-error">{importPlanError}</p>}
+            <label>Plan Title</label>
+            <input
+              value={importPlan.planTitle}
+              onChange={(e) => setImportPlan({ ...importPlan, planTitle: e.target.value })}
+            />
+            <div className="plan-preview">
+              {(importPlan.topics || []).map((topic, ti) => (
+                <div key={ti} className="plan-topic-block">
+                  <div className="plan-topic-title">{topic.title}</div>
+                  <div className="plan-items-list">
+                    {(topic.items || []).map((item, ii) => (
+                      <div key={ii} className="plan-item-row">
+                        <span className={`topic-type type-${item.type}`}>{item.type}</span>
+                        <span className="plan-item-title">{item.title || "Untitled"}</span>
+                        {item.testMode && <span className="teacher-only-badge">Tests</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="plan-summary-note">
+              This will create <strong>{importPlan.topics?.length || 0}</strong> topic(s) and{" "}
+              <strong>{importPlan.topics?.reduce((acc, t) => acc + (t.items?.length || 0), 0)}</strong> item(s) in your class.
+            </p>
+          </div>
+          <div className="mcq-modal-footer">
+            <button className="primary-button" disabled={importPlanSaving} onClick={handleImportPlanSave}>
+              {importPlanSaving ? "Importing…" : "Import All"}
+            </button>
+            <button className="ghost-button" onClick={() => setImportPlan(null)}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  async function handleImportLearningSave() {
+    if (!activeClassId || !importLearning) return;
+    setImportLearningError("");
+    if (!importLearning.title.trim()) { setImportLearningError("Title is required."); return; }
+    setImportLearningSaving(true);
+    try {
+      let topicId = importLearningTopicId;
+      if (topicId === "__new__") {
+        if (!importLearningNewTopic.trim()) {
+          setImportLearningError("New topic title is required.");
+          setImportLearningSaving(false);
+          return;
+        }
+        const topicRes = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ title: importLearningNewTopic.trim() }),
+        });
+        const topicData = await topicRes.json();
+        if (!topicRes.ok) { setImportLearningError(topicData?.error?.message || "Failed to create topic."); setImportLearningSaving(false); return; }
+        const created = topicData?.data?.topic;
+        topicId = created?.id || created?._id;
+        setTopics((prev) => [...prev, created]);
+      }
+      const itemRes = await fetch(`${API_BASE}/classes/${activeClassId}/topics/${topicId}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          title: importLearning.title.trim(),
+          type: "learning",
+          practiceBody: importLearning.body || "",
+          practiceInstructions: importLearning.instructions || "",
+          practiceHints: Array.isArray(importLearning.hints) ? importLearning.hints : [],
+          practiceCodeStarter: importLearning.codeStarter || "",
+        }),
+      });
+      const itemData = await itemRes.json();
+      if (!itemRes.ok) { setImportLearningError(itemData?.error?.message || "Failed to save learning item."); setImportLearningSaving(false); return; }
+      if (itemData?.data?.item) {
+        setTopics((prev) =>
+          prev.map((t) =>
+            (t.id === topicId || t._id?.toString() === topicId)
+              ? { ...t, items: [...(t.items || []), itemData.data.item] }
+              : t
+          )
+        );
+      }
+      setImportLearning(null);
+      setToast({ type: "success", message: "Learning lesson imported!" });
+    } catch {
+      setImportLearningError("Server not reachable.");
+    } finally {
+      setImportLearningSaving(false);
+    }
+  }
+
+  function renderImportLearningModal() {
+    if (!importLearning) return null;
+    return (
+      <div className="modal-overlay" onClick={() => setImportLearning(null)}>
+        <div className="modal-content mcq-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="mcq-modal-header">
+            <div>
+              <p className="mcq-modal-eyebrow">AI Generated</p>
+              <h3 className="mcq-modal-title">Import Learning Lesson</h3>
+            </div>
+            <button type="button" className="mcq-modal-close" onClick={() => setImportLearning(null)}>✕</button>
+          </div>
+          <div className="mcq-modal-body">
+            {importLearningError && <p className="mcq-modal-error">{importLearningError}</p>}
+
+            <label>Lesson Title</label>
+            <input
+              value={importLearning.title}
+              onChange={(e) => setImportLearning({ ...importLearning, title: e.target.value })}
+              placeholder="Short label, e.g. What is a Loop?"
+            />
+
+            <label>Body / Explanation</label>
+            <textarea
+              value={importLearning.body}
+              onChange={(e) => setImportLearning({ ...importLearning, body: e.target.value })}
+              rows={4}
+            />
+
+            <label>Instructions (optional)</label>
+            <textarea
+              value={importLearning.instructions}
+              onChange={(e) => setImportLearning({ ...importLearning, instructions: e.target.value })}
+              rows={2}
+            />
+
+            <label>Hints (one per line, optional)</label>
+            <textarea
+              value={(importLearning.hints || []).join("\n")}
+              onChange={(e) =>
+                setImportLearning({
+                  ...importLearning,
+                  hints: e.target.value.split("\n").map((h) => h.trim()).filter(Boolean),
+                })
+              }
+              rows={3}
+            />
+
+            <label>Code Example (optional)</label>
+            <textarea
+              className="practice-modal-code"
+              value={importLearning.codeStarter}
+              onChange={(e) => setImportLearning({ ...importLearning, codeStarter: e.target.value })}
+              rows={4}
+              spellCheck={false}
+            />
+
+            <label>Save to Topic</label>
+            <select
+              value={importLearningTopicId}
+              onChange={(e) => setImportLearningTopicId(e.target.value)}
+            >
+              {topics.map((t) => (
+                <option key={t.id} value={t.id}>{t.title}</option>
+              ))}
+              <option value="__new__">+ Create new topic...</option>
+            </select>
+            {importLearningTopicId === "__new__" && (
+              <input
+                placeholder="New topic title"
+                value={importLearningNewTopic}
+                onChange={(e) => setImportLearningNewTopic(e.target.value)}
+                style={{ marginTop: 6 }}
+              />
+            )}
+          </div>
+          <div className="mcq-modal-footer">
+            <button className="primary-button" disabled={importLearningSaving} onClick={handleImportLearningSave}>
+              {importLearningSaving ? "Saving..." : "Save Lesson"}
+            </button>
+            <button className="ghost-button" onClick={() => setImportLearning(null)}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderChatBot() {
+    if (!user) return null;
+
+    function onFabMouseDown(e) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startRight = fabPos.right;
+      const startBottom = fabPos.bottom;
+      fabDraggingRef.current = false;
+
+      function onMove(ev) {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        if (!fabDraggingRef.current && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+        fabDraggingRef.current = true;
+        setFabPos({
+          right: Math.max(8, Math.min(window.innerWidth - 64, startRight - dx)),
+          bottom: Math.max(8, Math.min(window.innerHeight - 64, startBottom - dy)),
+        });
+      }
+
+      function onUp() {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        if (!fabDraggingRef.current) setChatOpen(true);
+        fabDraggingRef.current = false;
+      }
+
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    }
+
+    // When expanded the CSS class centers the panel — don't override with fabPos
+    const panelStyle = chatExpanded ? {} : {
+      right: fabPos.right,
+      bottom: fabPos.bottom + 72,
+    };
+
+    return (
+      <>
+        {!chatOpen && (
+          <button
+            className="chat-fab"
+            type="button"
+            onMouseDown={onFabMouseDown}
+            title="Open AI Assistant (drag to move)"
+            style={{ right: fabPos.right, bottom: fabPos.bottom }}
+          >
+            AI
+          </button>
+        )}
+        {chatOpen && (
+          <>
+            {chatExpanded && (
+              <div className="chat-expand-backdrop" onClick={() => {
+                setChatAnimDir("collapsing");
+                setTimeout(() => {
+                  setChatExpanded(false);
+                  setChatAnimDir("fadein");
+                  setTimeout(() => setChatAnimDir(null), 200);
+                }, 180);
+              }} />
+            )}
+          <div
+            className={[
+              "chat-panel",
+              chatExpanded ? "chat-panel-expanded" : "",
+              chatAnimDir ? `chat-anim-${chatAnimDir}` : "",
+            ].filter(Boolean).join(" ")}
+            style={panelStyle}
+          >
+            <div className="chat-header">
+              <span>{user.role === "teacher" ? "Teaching Assistant" : "Learning Buddy"}</span>
+              <div className="chat-header-actions">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => {
+                    if (!chatExpanded) {
+                      // Expanding: show expanded first, then animate pop-in
+                      setChatExpanded(true);
+                      setChatAnimDir("expanding");
+                      setTimeout(() => setChatAnimDir(null), 300);
+                    } else {
+                      // Collapsing: fade out while expanded, then snap to collapsed + fade in
+                      setChatAnimDir("collapsing");
+                      setTimeout(() => {
+                        setChatExpanded(false);
+                        setChatAnimDir("fadein");
+                        setTimeout(() => setChatAnimDir(null), 200);
+                      }, 180);
+                    }
+                  }}
+                >
+                  {chatExpanded ? "Shrink" : "Expand"}
+                </button>
+                <button type="button" className="ghost-button" onClick={clearChat}>
+                  Clear
+                </button>
+                <button type="button" className="ghost-button" onClick={() => { setChatOpen(false); setChatExpanded(false); }}>
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="chat-messages">
+              {chatMessages.length === 0 && (
+                <p className="chat-empty">
+                  {user.role === "teacher"
+                    ? "Ask me to generate exercises, quiz questions, or help grade student submissions based on your lesson content."
+                    : "Ask me for hints, help debugging your code, or to explain Python concepts."}
+                </p>
+              )}
+              {chatMessages.map((msg, i) => (
+                <div key={i} className={`chat-msg chat-msg-${msg.role}`}>
+                  <div className="chat-msg-header">
+                    <span className="chat-msg-role">{msg.role === "user" ? "You" : "AI"}</span>
+                    {msg.content && (
+                      <div style={{ display: "flex", gap: "4px" }}>
+                        <button
+                          type="button"
+                          className="chat-copy-btn"
+                          title="Copy to clipboard"
+                          onClick={() => {
+                            navigator.clipboard.writeText(msg.content);
+                            setCopiedMsgIdx(i);
+                            setTimeout(() => setCopiedMsgIdx(null), 2000);
+                          }}
+                        >
+                          {copiedMsgIdx === i ? "Copied!" : "Copy"}
+                        </button>
+                        {msg.role === "assistant" &&
+                          user.role === "teacher" &&
+                          activeClassId &&
+                          parseMcqFromMessage(msg.content) && (
+                            <button
+                              type="button"
+                              className="chat-copy-btn chat-import-btn"
+                              title="Import as MCQ Quiz"
+                              onClick={() => {
+                                const mcq = parseMcqFromMessage(msg.content);
+                                if (mcq) {
+                                  setImportMcq(mcq);
+                                  setImportMcqTopicId(topics[0]?.id || "__new__");
+                                  setImportMcqTitle(mcq.title || mcq.question.slice(0, 60));
+                                  setImportMcqError("");
+                                  setImportMcqNewTopic("");
+                                }
+                              }}
+                            >
+                              Import MCQ
+                            </button>
+                          )}
+                        {msg.role === "assistant" &&
+                          user.role === "teacher" &&
+                          activeClassId &&
+                          parseSaFromMessage(msg.content) && (
+                            <button
+                              type="button"
+                              className="chat-copy-btn chat-import-btn"
+                              title="Import as Short Answer Quiz"
+                              onClick={() => {
+                                const sa = parseSaFromMessage(msg.content);
+                                if (sa) {
+                                  setImportSa(sa);
+                                  setImportSaTopicId(topics[0]?.id || "__new__");
+                                  setImportSaError("");
+                                  setImportSaNewTopic("");
+                                }
+                              }}
+                            >
+                              Import Short Answer
+                            </button>
+                          )}
+                        {msg.role === "assistant" &&
+                          user.role === "teacher" &&
+                          activeClassId &&
+                          parsePracticeFromMessage(msg.content) && (
+                            <button
+                              type="button"
+                              className="chat-copy-btn chat-import-btn"
+                              title="Import as Coding Exercise"
+                              onClick={() => {
+                                const ex = parsePracticeFromMessage(msg.content);
+                                if (ex) {
+                                  setImportPractice(ex);
+                                  setImportPracticeTopicId(topics[0]?.id || "__new__");
+                                  setImportPracticeError("");
+                                  setImportPracticeNewTopic("");
+                                }
+                              }}
+                            >
+                              Import Exercise
+                            </button>
+                          )}
+                        {msg.role === "assistant" &&
+                          user.role === "teacher" &&
+                          activeClassId &&
+                          parseLessonPlanFromMessage(msg.content) && (
+                            <button
+                              type="button"
+                              className="chat-copy-btn chat-import-btn"
+                              title="Import full lesson plan"
+                              onClick={() => {
+                                const plan = parseLessonPlanFromMessage(msg.content);
+                                if (plan) {
+                                  setImportPlan(plan);
+                                  setImportPlanError("");
+                                }
+                              }}
+                            >
+                              Import Lesson Plan
+                            </button>
+                          )}
+                        {msg.role === "assistant" &&
+                          user.role === "teacher" &&
+                          activeClassId &&
+                          parseLearningFromMessage(msg.content) && (
+                            <button
+                              type="button"
+                              className="chat-copy-btn chat-import-btn"
+                              title="Import as Learning Lesson"
+                              onClick={() => {
+                                const item = parseLearningFromMessage(msg.content);
+                                if (item) {
+                                  setImportLearning(item);
+                                  setImportLearningTopicId(topics[0]?.id || "__new__");
+                                  setImportLearningError("");
+                                  setImportLearningNewTopic("");
+                                }
+                              }}
+                            >
+                              Import Learning
+                            </button>
+                          )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="chat-msg-content">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{stripMachineBlocks(msg.content)}</ReactMarkdown>
+                  </div>
+                </div>
+              ))}
+              {chatLoading && chatMessages[chatMessages.length - 1]?.role !== "assistant" && (
+                <div className="chat-msg chat-msg-assistant">
+                  <span className="chat-msg-role">AI</span>
+                  <p className="chat-msg-content chat-typing">Thinking...</p>
+                </div>
+              )}
+              {chatError && <p className="chat-error">{chatError}</p>}
+              <div ref={chatMessagesEndRef} />
+            </div>
+            <div className="chat-input-bar">
+              <input
+                type="text"
+                className="chat-input"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") sendChatMessage(); }}
+                placeholder={
+                  user.role === "teacher"
+                    ? "Generate a coding exercise for this lesson..."
+                    : "I'm stuck on this code..."
+                }
+                disabled={chatLoading}
+              />
+              <button
+                type="button"
+                className="chat-send"
+                onClick={sendChatMessage}
+                disabled={chatLoading || !chatInput.trim()}
+              >
+                Send
+              </button>
+            </div>
+          </div>
+          </>
+        )}
+        {renderImportMcqModal()}
+        {renderImportSaModal()}
+        {renderImportPracticeModal()}
+        {renderImportPlanModal()}
+        {renderImportLearningModal()}
+      </>
+    );
+  }
+
   function handleSaveJson() {
+    if (route.page === "practice" && isTeacherView && practiceDraft._itemId) {
+      setLessonJson(JSON.stringify(lesson, null, 2));
+      async function persistPractice() {
+        try {
+          const res = await fetch(
+            `${API_BASE}/classes/${activeClassId}/topics/${practiceDraft._topicId}/items/${practiceDraft._itemId}`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json", ...authHeaders() },
+              body: JSON.stringify({
+                title: practiceDraft.heading,
+                type: "practice",
+                practiceBody: practiceDraft.body,
+                practiceInstructions: practiceDraft.instructions,
+                practiceQuestion: practiceDraft.question,
+                practiceHints: practiceDraft.hints,
+                practiceCodeStarter: practiceDraft.codeStarter,
+                practiceModelAnswer: practiceDraft.modelAnswer,
+                practiceTestMode: practiceDraft.testMode,
+                practiceTestCases: practiceDraft.testCases,
+              }),
+            }
+          );
+          if (res.ok) {
+            setToast({ type: "success", message: "Exercise saved!" });
+          } else {
+            setToast({ type: "error", message: "Failed to save exercise." });
+          }
+        } catch {
+          setToast({ type: "error", message: "Server not reachable." });
+        }
+      }
+      persistPractice();
+      return;
+    }
     if (route.page === "practice") {
       setLessonJson(JSON.stringify(lesson, null, 2));
       return;
@@ -1921,6 +3739,7 @@ export default function App() {
             </div>
           </section>
         </main>
+        {renderChatBot()}
       </PageShell>
     );
   }
@@ -2012,7 +3831,24 @@ export default function App() {
             )}
             <div className="topic-grid">
               {topics.map((topic) => (
-                <article key={topic.id} className="topic-card panel-animate">
+                <article
+                  key={topic.id}
+                  className={`topic-card panel-animate${dragOverTopicId === topic.id ? " drag-over-topic" : ""}`}
+                  draggable={isTeacher && editingTopicId !== topic.id}
+                  onDragStart={(e) => {
+                    if (!dragTopicFromHandleRef.current) { e.preventDefault(); return; }
+                    dragTopicRef.current = topic.id;
+                  }}
+                  onDragOver={(e) => { e.preventDefault(); if (dragTopicRef.current) setDragOverTopicId(topic.id); }}
+                  onDragLeave={() => setDragOverTopicId(null)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOverTopicId(null);
+                    if (dragTopicRef.current) handleTopicReorder(dragTopicRef.current, topic.id);
+                    dragTopicRef.current = null;
+                  }}
+                  onDragEnd={() => { dragTopicRef.current = null; dragTopicFromHandleRef.current = false; setDragOverTopicId(null); }}
+                >
                   <div className="topic-header">
                     {editingTopicId === topic.id ? (
                       <div className="topic-edit">
@@ -2039,6 +3875,14 @@ export default function App() {
                       </div>
                     ) : (
                       <div className="topic-title-row">
+                        {isTeacher && (
+                          <span
+                            className="topic-drag-handle"
+                            title="Drag to reorder"
+                            onMouseDown={() => { dragTopicFromHandleRef.current = true; }}
+                            onMouseUp={() => { dragTopicFromHandleRef.current = false; }}
+                          >⠿</span>
+                        )}
                         <h3>{topic.title}</h3>
                         {isTeacher && (
                           <div className="topic-actions-inline">
@@ -2065,7 +3909,29 @@ export default function App() {
                   <div className="topic-sections">
                     {(topic.items || []).length ? (
                       (topic.items || []).map((item) => (
-                        <div key={item.id} className="topic-section-row">
+                        <div
+                          key={item.id}
+                          className={`topic-section-row${dragOverItemId === item.id ? " drag-over" : ""}`}
+                          draggable={isTeacher && editingItemId !== item.id}
+                          onDragStart={(e) => {
+                            e.stopPropagation();
+                            if (!dragFromHandleRef.current) { e.preventDefault(); return; }
+                            dragItemRef.current = { topicId: topic.id, itemId: item.id };
+                          }}
+                          onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); if (dragItemRef.current) setDragOverItemId(item.id); }}
+                          onDragLeave={(e) => { e.stopPropagation(); setDragOverItemId(null); }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDragOverItemId(null);
+                            const drag = dragItemRef.current;
+                            if (drag && drag.topicId === topic.id) {
+                              handleItemReorder(topic.id, drag.itemId, item.id);
+                            }
+                            dragItemRef.current = null;
+                          }}
+                          onDragEnd={(e) => { e.stopPropagation(); dragItemRef.current = null; dragFromHandleRef.current = false; setDragOverItemId(null); }}
+                        >
                           {editingItemId === item.id ? (
                             <div className="topic-item-edit">
                               <input
@@ -2098,6 +3964,32 @@ export default function App() {
                                   Practice
                                 </button>
                               </div>
+                              {editingItemType === "learning" && (
+                                <div className="learning-edit-fields">
+                                  <textarea
+                                    className="class-input"
+                                    value={editingItemBody}
+                                    onChange={(e) => setEditingItemBody(e.target.value)}
+                                    placeholder="Lesson body — explain the concept in plain language"
+                                    rows={4}
+                                  />
+                                  <input
+                                    className="class-input"
+                                    type="text"
+                                    value={editingItemInstructions}
+                                    onChange={(e) => setEditingItemInstructions(e.target.value)}
+                                    placeholder="Instructions (optional)"
+                                  />
+                                  <textarea
+                                    className="class-input practice-modal-code"
+                                    value={editingItemCodeStarter}
+                                    onChange={(e) => setEditingItemCodeStarter(e.target.value)}
+                                    placeholder="Code example (optional Python code)"
+                                    rows={3}
+                                    spellCheck={false}
+                                  />
+                                </div>
+                              )}
                               {editingItemType === "quiz" && (
                                 <div className="quiz-builder">
                                   <p className="progress-meta">Question type</p>
@@ -2257,6 +4149,15 @@ export default function App() {
                             </div>
                           ) : (
                             <>
+                              {/* Always render handle col so the grid stays 4-column for both roles */}
+                              <span
+                                className={`drag-handle${isTeacher ? "" : " drag-handle-hidden"}`}
+                                title={isTeacher ? "Drag to reorder" : undefined}
+                                onMouseDown={() => { dragFromHandleRef.current = true; }}
+                                onMouseUp={() => { dragFromHandleRef.current = false; }}
+                              >
+                                {isTeacher ? "⠿" : ""}
+                              </span>
                               <span className={`topic-type type-${item.type}`}>
                                 {item.type}
                               </span>
@@ -2268,61 +4169,44 @@ export default function App() {
                                     {item.quizQuestion}
                                   </span>
                                 )}
+                                {item.type === "learning" && item.practiceBody && (
+                                  <span className="topic-item-meta">
+                                    {item.practiceBody.slice(0, 80)}{item.practiceBody.length > 80 ? "…" : ""}
+                                  </span>
+                                )}
                               </div>
-                              {isTeacher && (
-                                <div className="topic-item-actions">
-                                  <button
-                                    className="ghost-button"
-                                    type="button"
-                                    onClick={() => beginEditItem(item)}
-                                  >
-                                    Edit
-                                  </button>
-                                  <button
-                                    className="ghost-button danger"
-                                    type="button"
-                                    onClick={() => deleteItem(topic.id, item.id)}
-                                  >
-                                    Delete
-                                  </button>
-                                </div>
-                              )}
-                              {!isTeacher && item.type === "practice" && (
+                              {/* All actions in ONE div so it stays in the 4th grid column */}
+                              <div className="topic-item-actions">
                                 <button
                                   className="ghost-button"
                                   type="button"
-                                  onClick={() => navigateToPractice(activeClassId, item.id)}
+                                  onClick={() => {
+                                    if (item.type === "practice") navigateToPractice(activeClassId, item.id);
+                                    else if (item.type === "quiz") navigateToQuiz(activeClassId, item.id);
+                                    else navigateToLearningItem(activeClassId, item.id);
+                                  }}
                                 >
                                   Open
                                 </button>
-                              )}
-                              {!isTeacher && item.type === "quiz" && (
-                                <button
-                                  className="ghost-button"
-                                  type="button"
-                                  onClick={() => navigateToQuiz(activeClassId, item.id)}
-                                >
-                                  Open
-                                </button>
-                              )}
-                              {isTeacher && item.type === "practice" && (
-                                <button
-                                  className="ghost-button"
-                                  type="button"
-                                  onClick={() => navigateToPractice(activeClassId, item.id)}
-                                >
-                                  Open
-                                </button>
-                              )}
-                              {isTeacher && item.type === "quiz" && (
-                                <button
-                                  className="ghost-button"
-                                  type="button"
-                                  onClick={() => navigateToQuiz(activeClassId, item.id)}
-                                >
-                                  Open
-                                </button>
-                              )}
+                                {isTeacher && (
+                                  <>
+                                    <button
+                                      className="ghost-button"
+                                      type="button"
+                                      onClick={() => beginEditItem(item)}
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      className="ghost-button danger"
+                                      type="button"
+                                      onClick={() => deleteItem(topic.id, item.id)}
+                                    >
+                                      Delete
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             </>
                           )}
                         </div>
@@ -2594,6 +4478,53 @@ export default function App() {
           )}
         </section>
       </main>
+      {renderChatBot()}
+      </PageShell>
+    );
+  }
+
+  if (route.page === "learn") {
+    return (
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className={isTeacher ? "teacher-dashboard" : "student-dashboard"}>
+          <header className="teacher-topbar">
+            <div>
+              <p className="teacher-eyebrow">
+                {isTeacher ? "Teacher Workspace" : "Student Workspace"}
+              </p>
+              <h1>{learningMeta?.title || "Lesson"}</h1>
+              {activeClass && (
+                <p className="class-subtitle">Class: {activeClass.name}</p>
+              )}
+            </div>
+            <div className="teacher-actions">
+              <button className="ghost-button" type="button" onClick={() => navigateToClass(activeClassId)}>
+                Back to Class
+              </button>
+              <button className="ghost-button" type="button" onClick={navigateToClasses}>
+                Back to Classes
+              </button>
+              <span className="user-pill">{user.name}</span>
+              <span className="role-pill">{user.role}</span>
+              <button className="ghost-button" type="button" onClick={handleLogout}>
+                Log out
+              </button>
+            </div>
+          </header>
+          {learningError && <p className="practice-error">{learningError}</p>}
+          {learningMeta && (
+            <LearningViewer
+              meta={learningMeta}
+              isTeacher={isTeacher}
+              activeClassId={activeClassId}
+              authHeaders={authHeaders}
+              API_BASE={API_BASE}
+              onSaved={(updated) => setLearningMeta((prev) => ({ ...prev, ...updated }))}
+              setToast={setToast}
+            />
+          )}
+        </main>
+        {renderChatBot()}
       </PageShell>
     );
   }
@@ -2636,22 +4567,36 @@ export default function App() {
                 <p className="progress-meta">
                   {quizMeta.topic?.title || "Topic"} · {isMcq ? "MCQ" : "Short answer"}
                 </p>
-                <h2>{quizMeta.quizQuestion || "No question set yet."}</h2>
+                <div className="quiz-question-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {quizMeta.quizQuestion || "No question set yet."}
+                  </ReactMarkdown>
+                </div>
                 {isMcq ? (
                   <div className="quiz-options">
-                    {(quizMeta.quizOptions || []).map((option) => (
-                      <label key={option} className="quiz-option">
-                        <input
-                          type="radio"
-                          name="quiz-option"
-                          value={option}
-                          checked={quizResponse === option}
-                          onChange={(event) => setQuizResponse(event.target.value)}
-                          disabled={quizSubmitting || user.role !== "student"}
-                        />
-                        <span>{option}</span>
-                      </label>
-                    ))}
+                    {(quizMeta.quizOptions || []).map((option) => {
+                      // Detect code-like options: has newline OR starts with Python keywords
+                      const isCode = option.includes("\n") ||
+                        /^(for|if|elif|else|while|def|class|import|from|try|with|return|print)\b/.test(option.trim()) ||
+                        /^\w+\s*[=(]/.test(option.trim());
+                      return (
+                        <label key={option} className={`quiz-option${isCode ? " quiz-option-code" : ""}`}>
+                          <input
+                            type="radio"
+                            name="quiz-option"
+                            value={option}
+                            checked={quizResponse === option}
+                            onChange={(event) => setQuizResponse(event.target.value)}
+                            disabled={quizSubmitting || user.role !== "student"}
+                          />
+                          {isCode ? (
+                            <pre className="quiz-option-pre"><code>{option}</code></pre>
+                          ) : (
+                            <span>{option}</span>
+                          )}
+                        </label>
+                      );
+                    })}
                   </div>
                 ) : (
                   <textarea
@@ -2704,6 +4649,7 @@ export default function App() {
             )}
           </section>
         </main>
+        {renderChatBot()}
       </PageShell>
     );
   }
@@ -2888,6 +4834,7 @@ export default function App() {
           </section>
         )}
         </main>
+        {renderChatBot()}
       </PageShell>
     );
   }
@@ -2954,46 +4901,6 @@ export default function App() {
               </span>
             )}
           </div>
-          <div className="lesson-list">
-            <p className="lesson-list-title">Lessons</p>
-            <div className="lesson-list-items">
-              {!activeClassId && (
-                <p className="empty-state">Select a class to see lessons.</p>
-              )}
-              {activeClassId && lessons.length === 0 && (
-                <p className="empty-state">No lessons yet for this class.</p>
-              )}
-              {activeClassId &&
-                lessons.map((item) => (
-                  <div
-                    key={item.id}
-                    className={
-                      item.id === activeLessonId
-                        ? "lesson-list-row active"
-                        : "lesson-list-row"
-                    }
-                  >
-                    <button
-                      type="button"
-                      className="lesson-list-item"
-                      onClick={() => handleSelectLesson(item.id)}
-                    >
-                      <span>{item.heading}</span>
-                      <small>{item.duration}</small>
-                    </button>
-                    {isTeacher && (
-                      <button
-                        type="button"
-                        className="ghost-button danger"
-                        onClick={() => handleDeleteLesson(item.id)}
-                      >
-                        Delete
-                      </button>
-                    )}
-                  </div>
-                ))}
-            </div>
-          </div>
           <div className="lesson-header">
             {isTeacherView ? (
               <>
@@ -3047,13 +4954,15 @@ export default function App() {
                   onChange={(event) => updateActiveLesson({ body: event.target.value })}
                 />
               </label>
-              <label className="lesson-field">
-                Question
-                <textarea
-                  value={lesson.question}
-                  onChange={(event) => updateActiveLesson({ question: event.target.value })}
-                />
-              </label>
+              {route.page !== "practice" && (
+                <label className="lesson-field">
+                  Question
+                  <textarea
+                    value={lesson.question}
+                    onChange={(event) => updateActiveLesson({ question: event.target.value })}
+                  />
+                </label>
+              )}
               <label className="lesson-field">
                 Instructions
                 <textarea
@@ -3084,10 +4993,103 @@ export default function App() {
                   placeholder="# Start your lesson code here"
                 />
               </label>
+              {route.page === "practice" && (
+                <>
+                  <label className="lesson-field lesson-model-answer">
+                    <span>
+                      Model Answer{" "}
+                      <span className="teacher-only-badge">Teacher only</span>
+                    </span>
+                    <textarea
+                      value={lesson.modelAnswer || ""}
+                      onChange={(event) => updateActiveLesson({ modelAnswer: event.target.value })}
+                      placeholder="# Write the correct solution here"
+                      className="model-answer-editor"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <div className="test-cases-section">
+                    <label className="test-cases-toggle">
+                      <input
+                        type="checkbox"
+                        checked={lesson.testMode || false}
+                        onChange={(e) => updateActiveLesson({ testMode: e.target.checked })}
+                      />
+                      <span>Enable LeetCode-style test cases</span>
+                    </label>
+                    {lesson.testMode && (
+                      <>
+                        {(lesson.testCases || []).map((tc, i) => (
+                          <div key={i} className="test-case-row">
+                            <input
+                              className="test-case-label-input"
+                              placeholder={`Test ${i + 1} label`}
+                              value={tc.label || ""}
+                              onChange={(e) => {
+                                const next = [...(lesson.testCases || [])];
+                                next[i] = { ...tc, label: e.target.value };
+                                updateActiveLesson({ testCases: next });
+                              }}
+                            />
+                            <div className="test-case-fields">
+                              <textarea
+                                className="test-case-input"
+                                placeholder={"Input (one value per line)"}
+                                value={tc.input || ""}
+                                rows={2}
+                                onChange={(e) => {
+                                  const next = [...(lesson.testCases || [])];
+                                  next[i] = { ...tc, input: e.target.value };
+                                  updateActiveLesson({ testCases: next });
+                                }}
+                              />
+                              <textarea
+                                className="test-case-expected"
+                                placeholder={"Expected output"}
+                                value={tc.expectedOutput || ""}
+                                rows={2}
+                                onChange={(e) => {
+                                  const next = [...(lesson.testCases || [])];
+                                  next[i] = { ...tc, expectedOutput: e.target.value };
+                                  updateActiveLesson({ testCases: next });
+                                }}
+                              />
+                            </div>
+                            <button
+                              type="button"
+                              className="test-case-remove"
+                              title="Remove test case"
+                              onClick={() => {
+                                const next = (lesson.testCases || []).filter((_, idx) => idx !== i);
+                                updateActiveLesson({ testCases: next });
+                              }}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          className="ghost-button test-case-add"
+                          onClick={() =>
+                            updateActiveLesson({
+                              testCases: [...(lesson.testCases || []), { label: "", input: "", expectedOutput: "" }],
+                            })
+                          }
+                        >
+                          + Add Test Case
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </>
+              )}
             </>
           ) : (
             <>
-              <p className="lesson-body">{lesson.body}</p>
+              <div className="lesson-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{lesson.body || ""}</ReactMarkdown>
+              </div>
               <div className="lesson-callout">
                 <p>Hints</p>
                 <ul>
@@ -3121,6 +5123,16 @@ export default function App() {
             <button className="run-pill" type="button" id="run-btn">
               Run
             </button>
+            {route.page === "practice" && practiceDraft.testMode && (
+              <button
+                className="run-pill test-pill"
+                type="button"
+                onClick={runTestCases}
+                disabled={testRunning}
+              >
+                {testRunning ? "Running…" : "Run Tests"}
+              </button>
+            )}
             <button className="ghost-button" type="button" onClick={submitLesson}>
               Submit
             </button>
@@ -3136,9 +5148,46 @@ export default function App() {
           <div className="output-shell">
             <pre id="output" className="output-body" />
           </div>
+          {(errorExplaining || errorExplanation) && (
+            <div className="error-explain-box">
+              <span className="error-explain-label">What does this mean?</span>
+              {errorExplaining
+                ? <span className="error-explain-loading">Figuring it out…</span>
+                : <span className="error-explain-text">{errorExplanation}</span>
+              }
+            </div>
+          )}
+          {testResults && (
+            <div className="test-results-panel">
+              <div className="test-results-header">
+                <span>Test Results</span>
+                <div className="test-results-header-right">
+                  <span className={`test-score ${testResults.every((r) => r.passed) ? "test-score-pass" : "test-score-fail"}`}>
+                    {testResults.filter((r) => r.passed).length} / {testResults.length} passed
+                  </span>
+                  <button className="test-results-close" onClick={() => setTestResults(null)} title="Close">✕</button>
+                </div>
+              </div>
+              {testResults.map((r, i) => (
+                <div key={i} className={`test-result-row ${r.passed ? "pass" : "fail"}`}>
+                  <span className="test-result-icon">{r.passed ? "✓" : "✗"}</span>
+                  <span className="test-result-label">{r.label || `Test ${i + 1}`}</span>
+                  {!r.passed && (
+                    <div className="test-result-detail">
+                      <span>Expected: <code>{r.expected}</code></span>
+                      <span>Got: <code>{r.actual}</code></span>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </aside>
       </section>
     </main>
+
+    {renderChatBot()}
+
     </PageShell>
   );
 }

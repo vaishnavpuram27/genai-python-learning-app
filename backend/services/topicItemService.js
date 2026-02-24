@@ -1,7 +1,20 @@
 import TopicItem from "../models/TopicItem.js";
 
 export async function listTopicItemsByClass(classId) {
-  return TopicItem.find({ classId }).sort({ createdAt: 1 }).lean();
+  return TopicItem.find({ classId }).sort({ order: 1, createdAt: 1 }).lean();
+}
+
+export async function countTopicItemsByTopic(topicId) {
+  return TopicItem.countDocuments({ topicId });
+}
+
+export async function reorderTopicItems(itemIds) {
+  // itemIds is an ordered array of item ID strings; assign order = index
+  await Promise.all(
+    itemIds.map((id, index) =>
+      TopicItem.findByIdAndUpdate(id, { $set: { order: index } })
+    )
+  );
 }
 
 export async function createTopicItem(payload) {

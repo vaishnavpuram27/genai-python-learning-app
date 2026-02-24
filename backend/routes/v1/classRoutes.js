@@ -12,12 +12,15 @@ import {
   listStudents,
   listTopics,
   createTopicHandler,
+  reorderTopicsHandler,
   createTopicItemHandler,
+  reorderTopicItemsHandler,
   updateTopicHandler,
   deleteTopicHandler,
   updateTopicItemHandler,
   deleteTopicItemHandler,
   getPracticeItem,
+  getLearningItem,
   getQuizItem,
   submitQuizAttempt,
   gradeQuizAttempt,
@@ -38,6 +41,8 @@ router.get(
 );
 router.get("/:id/topics", validateObjectId("id"), listTopics);
 router.post("/:id/topics", validateObjectId("id"), createTopicHandler);
+// Reorder route must be BEFORE /:topicId so "reorder" isn't matched as a topicId
+router.put("/:id/topics/reorder", validateObjectId("id"), reorderTopicsHandler);
 router.put("/:id/topics/:topicId", validateObjectId("id"), validateObjectId("topicId"), updateTopicHandler);
 router.delete("/:id/topics/:topicId", validateObjectId("id"), validateObjectId("topicId"), deleteTopicHandler);
 router.post(
@@ -45,6 +50,13 @@ router.post(
   validateObjectId("id"),
   validateObjectId("topicId"),
   createTopicItemHandler
+);
+// Reorder route must be BEFORE /:itemId routes so "reorder" isn't matched as an itemId
+router.put(
+  "/:id/topics/:topicId/items/reorder",
+  validateObjectId("id"),
+  validateObjectId("topicId"),
+  reorderTopicItemsHandler
 );
 router.put(
   "/:id/topics/:topicId/items/:itemId",
@@ -65,6 +77,12 @@ router.get(
   validateObjectId("id"),
   validateObjectId("itemId"),
   getPracticeItem
+);
+router.get(
+  "/:id/learn/:itemId",
+  validateObjectId("id"),
+  validateObjectId("itemId"),
+  getLearningItem
 );
 router.get(
   "/:id/quiz/:itemId",

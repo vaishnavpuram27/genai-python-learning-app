@@ -1,7 +1,19 @@
 import Topic from "../models/Topic.js";
 
 export async function listTopicsByClass(classId) {
-  return Topic.find({ classId }).sort({ createdAt: -1 }).lean();
+  return Topic.find({ classId }).sort({ order: 1, createdAt: 1 }).lean();
+}
+
+export async function countTopicsByClass(classId) {
+  return Topic.countDocuments({ classId });
+}
+
+export async function reorderTopics(topicIds) {
+  await Promise.all(
+    topicIds.map((id, index) =>
+      Topic.findByIdAndUpdate(id, { $set: { order: index } })
+    )
+  );
 }
 
 export async function createTopic(payload) {

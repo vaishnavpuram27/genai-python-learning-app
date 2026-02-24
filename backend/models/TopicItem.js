@@ -26,6 +26,24 @@ const topicItemSchema = new mongoose.Schema(
     quizQuestion: { type: String, default: "", trim: true },
     quizOptions: { type: [String], default: [] },
     quizAnswer: { type: String, default: "", trim: true },
+    practiceBody:         { type: String, default: "" },
+    practiceInstructions: { type: String, default: "" },
+    practiceQuestion:     { type: String, default: "" },
+    practiceHints:        { type: [String], default: [] },
+    practiceCodeStarter:  { type: String, default: "" },
+    practiceModelAnswer:  { type: String, default: "" },
+    order:                { type: Number, default: 0 },
+    practiceTestMode:     { type: Boolean, default: false },
+    practiceTestCases: {
+      type: [
+        {
+          label:          { type: String, default: "" },
+          input:          { type: String, default: "" },
+          expectedOutput: { type: String, default: "" },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );
