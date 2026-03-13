@@ -39,3 +39,7 @@ export async function deleteQuizAttemptsByItem(itemId) {
 export async function deleteQuizAttemptsByClass(classId) {
   return QuizAttempt.deleteMany({ classId });
 }
+
+export async function listQuizAttemptsByClass(classId) {
+  return QuizAttempt.find({ classId }).lean();
+}

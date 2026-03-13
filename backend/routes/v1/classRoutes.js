@@ -6,7 +6,10 @@ import {
   createClassHandler,
   deleteClassHandler,
   getClass,
+  getClassStats,
+  getMyClassProgress,
   getStudentProgress,
+  getStudentStats,
   joinClass,
   listClasses,
   listStudents,
@@ -39,6 +42,14 @@ router.get(
   validateObjectId("studentId"),
   getStudentProgress
 );
+router.get(
+  "/:id/students/:studentId/stats",
+  validateObjectId("id"),
+  validateObjectId("studentId"),
+  getStudentStats
+);
+router.get("/:id/stats", validateObjectId("id"), getClassStats);
+router.get("/:id/my-progress", validateObjectId("id"), getMyClassProgress);
 router.get("/:id/topics", validateObjectId("id"), listTopics);
 router.post("/:id/topics", validateObjectId("id"), createTopicHandler);
 // Reorder route must be BEFORE /:topicId so "reorder" isn't matched as a topicId

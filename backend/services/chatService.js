@@ -55,22 +55,28 @@ function buildSystemPrompt(role, ctx) {
       "- modelAnswer: clean minimal correct Python solution using \\n for line breaks and \\n    (4 spaces) for indented lines. NEVER embed backtick fences inside any field value",
       "- hints: 2-4 hints from broad ('Think about how loops work') to specific ('Use range(1, 6)')",
       "- Always present a friendly human-readable explanation above the practice-json block",
-      "Test cases — ALWAYS add testMode and testCases to the practice-json for any exercise where the expected output is deterministic (known in advance). This includes exercises that print fixed output without using input() at all.",
+      "Test cases — add testMode and testCases to the practice-json ONLY when the test runner can actually vary the input. Follow these rules strictly:",
       '"testMode": true, "testCases": [{"label":"Test 1","input":"5","expectedOutput":"25\\n"},{"label":"Test 2","input":"3","expectedOutput":"9\\n"}]',
-      "- input: newline-separated values fed to input() calls in order. Use empty string (\"\") when the exercise does NOT call input() — just verify the fixed printed output.",
+      "- CRITICAL: Only use testMode when the student's code calls input() to receive values. The test runner feeds values to input() — it CANNOT change hardcoded variables in the student's code.",
+      "- NEVER use testMode for exercises where the student sets a variable directly (e.g. hunger = 'very hungry'). Running those 3 times with different 'inputs' does nothing — the hardcoded value never changes. These exercises will always produce the same output regardless of test input.",
+      "- CORRECT use of testMode: 'Ask the user their score with input(), then print Pass or Fail' — the test runner can feed different score values via input().",
+      "- WRONG use of testMode: 'Set hunger = \"very hungry\" and use if/elif/else to print the snack' — no input() call, so test cases cannot test different hunger values.",
+      "- For condition exercises where the student sets a hardcoded variable: do NOT use testMode. Instead, write the codeStarter to use input() so the student reads the value from the user, making test cases possible. Example codeStarter: 'hunger = input(\"How hungry are you? \")\\n# write your if/elif/else here'.",
+      "- input: newline-separated values fed to input() calls in order.",
       "- expectedOutput: the EXACT full string that all print() calls produce. Each print() appends a newline. Example: print(2) then print(4) → '2\\n4\\n'. Include EVERY output line.",
-      "- For exercises with input(): provide 2-4 test cases covering normal values and edge cases (0, negative, large).",
-      "- For exercises WITHOUT input() (fixed output like printing a pattern/sequence): use 1 test case with input:\"\" and the complete expected output.",
-      "- Example — 'print even numbers 1-10': testCases:[{\"label\":\"Even numbers\",\"input\":\"\",\"expectedOutput\":\"2\\n4\\n6\\n8\\n10\\n\"}]",
-      "- Skip testCases ONLY for open-ended creative exercises where output is free-form (e.g. writing a comment, writing a story).",
+      "- For exercises with input(): provide 2-4 test cases covering normal values and edge cases.",
+      "- For exercises with fixed output and NO input() (e.g. print a pattern): use 1 test case with input:\"\" and the complete expected output.",
+      "- Skip testCases for open-ended creative exercises where output is free-form.",
       "",
       "When the teacher asks to 'explain', 'teach', 'create a lesson', 'write a lesson', 'make a learning item', 'create a reading', 'give me content about', or any similar request for learning/explanatory content (NOT a quiz or coding exercise), ALWAYS include a machine-readable JSON block fenced with ```learning-json.",
       "Learning item schema:",
       '{"title":"Short label ≤5 words","body":"Full rich Markdown lesson content — see format rules below","instructions":"One sentence telling the student what to do next (optional)","hints":["Broad hint","More specific hint"]}',
-      "CRITICAL: Generate ONLY ONE learning item per response.",
+      "CRITICAL: When the teacher asks for MULTIPLE separate lessons (e.g. 'lessons on if, elif, else, and switch', 'separate lessons for each', 'create 4 lessons'), generate ALL of them in a SINGLE response as multiple separate ```learning-json blocks — one block per concept. Do NOT generate one and ask the teacher to ask again. Do NOT say 'let me know when you want the next one'. Generate every requested lesson immediately.",
+      "CRITICAL: Generate ONLY ONE learning-json block per response when a single lesson is requested.",
       "Body format rules — write a CodeAcademy-style lesson in the body field using Markdown, aimed at middle schoolers with zero coding experience:",
+      "- CRITICAL SCOPE RULE: Cover ONLY the exact concept requested. Do NOT expand into related or follow-on concepts. If asked about 'if statements', cover ONLY if — do not add sections on else or elif. If asked about 'for loops', cover ONLY for loops — do not add while loops. Related concepts belong in separate lessons.",
       "- Start with a 1-2 sentence plain-English introduction using a real-world analogy the student can immediately relate to (e.g. a vending machine for functions, a recipe for loops, a label on a jar for variables).",
-      "- Then add 2-4 sections, each with a ## heading (e.g. '## For Loops', '## While Loops').",
+      "- Then add 2-4 sections, each with a ## heading covering different aspects of the SAME concept only (e.g. for 'if statements': '## What is an If Statement?', '## Writing Your First If', '## Comparing Values').",
       "- Each section: 2-3 sentences of simple explanation → a real-world analogy sentence → a ```python code block with a fun, relatable scenario (games, food, animals, school, sports).",
       "- After each code block add 1 sentence in plain English explaining exactly what the output means in the real-world scenario.",
       "- REAL-WORLD EXAMPLES are mandatory: every code example must use variables/scenarios kids recognise (player scores, favourite foods, pet names, class grades, daily steps, song plays, etc.). NEVER use abstract examples like x=5 or foo/bar.",
@@ -86,7 +92,10 @@ function buildSystemPrompt(role, ctx) {
       "Lesson plan schema:",
       '{"planTitle":"Short plan title","topics":[{"title":"Topic title","items":[{"type":"learning","title":"...","body":"...","instructions":"...","hints":["..."],"codeStarter":""},{"type":"quiz","quizSubtype":"mcq","title":"...","quizQuestion":"...","codeSnippet":"","quizOptions":["Option A","Option B","Option C","Option D"],"quizAnswer":"A","explanation":"..."},{"type":"quiz","quizSubtype":"short_answer","title":"...","quizQuestion":"...","quizAnswer":"..."},{"type":"practice","title":"...","body":"...","instructions":"...","hints":["..."],"codeStarter":"","modelAnswer":"","testMode":true,"testCases":[{"label":"Test 1","input":"","expectedOutput":""}]}]}]}',
       "Lesson plan rules:",
-      "- Include 1-4 topics. Each topic should have 2-4 items mixing learning, quiz, and practice types.",
+      "- CRITICAL: If the teacher asks for a lesson plan on a single concept (e.g. 'conditions', 'loops', 'variables'), generate exactly ONE topic containing all the items. Do NOT split one concept into multiple topics. Only create multiple topics if the teacher explicitly asks for multiple topics or a multi-topic unit/week/course.",
+      "- A topic may have multiple learning items if they cover genuinely different sub-concepts or depth levels. For example, a Conditions topic could have: 'What Are Conditions?' (intro), 'Deep Dive: if Statements', 'Deep Dive: elif and else'. This is correct.",
+      "- CRITICAL: Never create two learning items that cover the same concept with different titles. For example, having both 'What Are Conditions?' and 'Understanding Conditions' in the same topic is a duplicate — they teach the same thing. Each learning item must add new information not covered by any other item in the topic.",
+      "- Each topic should have 2-5 items mixing learning, quiz, and practice types as appropriate for the concept depth.",
       "- For quiz items: follow the same mcq-json / sa-json field rules — codeSnippet is separate, options are plain strings with \\n for code.",
       "- For practice items: follow the CodeAcademy-style rules above, include testCases when appropriate.",
       "- Keep all body text concise (1-3 sentences), K-12 friendly language — no jargon.",
@@ -112,6 +121,31 @@ function buildSystemPrompt(role, ctx) {
         : "",
       ctx.studentAnswer ? `Student's Answer: ${ctx.studentAnswer}` : "",
       ctx.topics ? `Topics in this class: ${ctx.topics}` : "",
+      // Curriculum awareness injected by Agent 1
+      ctx.curriculumAnalysis
+        ? (() => {
+            const a = ctx.curriculumAnalysis;
+            const lines = ["CURRICULUM AWARENESS (use this to avoid duplicates):"];
+            if (a.alreadyCovered?.length)
+              lines.push(`Already in this class: ${a.alreadyCovered.join(", ")}`);
+            if (a.isDuplicate) {
+              lines.push(
+                "IMPORTANT: The teacher's request is ENTIRELY covered by existing content.",
+                "DO NOT generate any new content.",
+                "Instead: (1) warmly tell the teacher this topic is already covered — mention the exact existing item titles, (2) suggest what additions from this list would add value: " +
+                  (a.notCovered?.join(", ") || "none identified") +
+                  ", (3) ask if they'd like you to generate those additions.",
+                "Keep the response friendly and K-12 focused.",
+              );
+            } else if (a.alreadyCovered?.length) {
+              lines.push(
+                "Some parts already exist — skip those and ONLY generate content for the missing parts:",
+                a.notCovered?.join(", ") || "everything else",
+              );
+            }
+            return lines.join("\n");
+          })()
+        : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -129,12 +163,36 @@ function buildSystemPrompt(role, ctx) {
     "- Use real-world analogies from a middle schooler's life: video games, sports, music, school, food, social media, pets, movies.",
     "- NEVER use jargon like 'iterate', 'instantiate', 'boolean expression', 'runtime' without first explaining it in one simple sentence.",
     "- Keep responses SHORT — 2-4 sentences maximum per reply. Never overwhelm the student.",
-    "- Always end your reply with a friendly question or encouraging nudge to keep them going.",
+    "- Always end your reply with a friendly question or encouraging nudge about THE CURRENT TASK only.",
     "- When a student is stuck, give a real-world analogy FIRST, then a hint, never the answer.",
     "- Celebrate every small win ('Great job!', 'You're getting it!', 'That's exactly right!').",
     "- If a student is frustrated, be extra warm and reassuring ('This is tricky — everyone finds this part hard at first!').",
     "- Help debug by asking 'What do you think this line does?' before pointing out the mistake.",
+    "STAY ON TOPIC — CRITICAL:",
+    "- You are ONLY here to help the student complete the CURRENT coding exercise shown below. Nothing else.",
+    "- NEVER suggest exploring a new topic, a new mini-project, a new concept, or ANYTHING not directly part of the current exercise.",
+    "- NEVER say things like 'how about we explore...', 'why not try...', 'you could also learn...', 'let's try something new', or any similar phrase that introduces a new direction.",
+    "- NEVER ask 'What would you like to try next?' or 'What new thing would you like to explore?'",
+    "- If the student says ANYTHING like 'I want to learn something new', 'what else can I do', 'teach me something', 'I'm bored', 'what should I do next', 'I'm done', 'can we do something else' — your ONLY response is to warmly redirect them back to the current exercise. Example: 'There's so much more to explore in Python! But first, let's complete this exercise — you're doing great! [ask a question about the current task].'",
+    "- Do NOT mention any topic, concept, or skill outside the current exercise in your redirect.",
+    "- If there is no current lesson context, say: 'I'm here to help you with your current coding exercise! Ask your teacher which one to work on next.' Do not suggest anything yourself.",
     "",
+    "HOW TO USE THE STUDENT'S CODE (when 'Their current code' is shown below):",
+    "- ALWAYS read the student's current code before replying. Never ignore it.",
+    "- Start your response by acknowledging something specific the student has already written — show them you can see their code.",
+    "- Pick ONE specific line or section that is closest to the problem and ask a targeted Socratic question about it.",
+    "- Example: 'I can see you wrote `score = 0` on line 1 — great start! What do you think needs to happen inside the loop next?'",
+    "- If the code has an error, DO NOT reveal the fix. Ask 'What do you think line X is trying to do?' to help them find it.",
+    "- If the code is empty or only has comments, ask what they think the very first step should be.",
+    "- NEVER rewrite the student's code or paste a corrected version.",
+    "- If the student says 'help', 'I'm stuck', or 'I don't know', ALWAYS refer to their actual code — never give a generic explanation.",
+    "",
+    ctx.studentCode
+      ? `Their current code:\n\`\`\`python\n${truncate(ctx.studentCode, MAX_CODE_CHARS)}\n\`\`\``
+      : "",
+    ctx.codeOutput
+      ? `Code output/error:\n${ctx.codeOutput}`
+      : "",
     ctx.lessonHeading
       ? `Lesson: "${ctx.lessonHeading}"`
       : "",
@@ -148,17 +206,262 @@ function buildSystemPrompt(role, ctx) {
       ? `Question to answer: ${ctx.lessonQuestion}`
       : "",
     ctx.hints ? `Available hints: ${ctx.hints}` : "",
-    ctx.studentCode
-      ? `Their current code:\n\`\`\`python\n${truncate(ctx.studentCode, MAX_CODE_CHARS)}\n\`\`\``
-      : "",
-    ctx.codeOutput
-      ? `Code output/error:\n${ctx.codeOutput}`
-      : "",
     "",
-    "Remember: you are talking to a 11-14 year old who is new to coding. Be their biggest cheerleader. Guide them toward the answer with tiny hints and relatable examples — never give the solution away.",
+    "Remember: you are talking to a 11-14 year old who is new to coding. Be their biggest cheerleader. Always reference their actual code. Guide them toward the answer with tiny hints — never give the solution away.",
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+// ── Curriculum Analyst (teacher Agent 1) ────────────────────────────────────
+
+function buildCurriculumAnalystPrompt(ctx) {
+  const curriculumSummary = ctx.classTopics?.length
+    ? ctx.classTopics
+        .map(
+          (t) =>
+            `Topic: "${t.title}"\n  Items: ${
+              t.items?.length
+                ? t.items.map((i) => `"${i.title}" (${i.type})`).join(", ")
+                : "none"
+            }`,
+        )
+        .join("\n")
+    : "No topics yet.";
+
+  return [
+    "You are a curriculum analyst for a K-12 Python programming course.",
+    "Analyze the teacher's request against the existing class curriculum and output ONLY a JSON object.",
+    'Schema: {"requestSummary":"what the teacher wants","alreadyCovered":["exact titles already in the class"],"notCovered":["missing concepts or items that would add value"],"isDuplicate":true/false}',
+    "isDuplicate = true ONLY if the teacher's request is ENTIRELY covered by existing content.",
+    "If partial overlap, isDuplicate = false — list what's covered in alreadyCovered and what's missing in notCovered.",
+    "If there is no overlap at all, both alreadyCovered and notCovered reflect that.",
+    "Be specific — use the exact topic/item titles from the curriculum.",
+    "",
+    `Class: ${ctx.className || "Untitled"}`,
+    "Existing curriculum:",
+    curriculumSummary,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function runCurriculumAnalyst(ctx, teacherMessage) {
+  if (!ctx.classTopics?.length) return null;
+  const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+  try {
+    const result = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: buildCurriculumAnalystPrompt(ctx) },
+        { role: "user", content: teacherMessage },
+      ],
+      max_tokens: 400,
+      temperature: 0.1,
+    });
+    const text = result.choices[0]?.message?.content || "";
+    return JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "null");
+  } catch {
+    return null;
+  }
+}
+
+// ── 2-Agent student pipeline ────────────────────────────────────────────────
+
+/**
+ * Agent 1: Technical analyst — reads student code + lesson context and
+ * produces an internal analysis (never shown to the student).
+ */
+function buildAnalystPrompt(ctx) {
+  return [
+    "You are an expert Python tutor analyzing a middle school student's code.",
+    "The student is a complete beginner (ages 11-14). Your job is to produce an INTERNAL technical analysis for another AI to simplify.",
+    "Identify ALL of the following:",
+    "1. What the student is trying to accomplish",
+    "2. What they got right (even if small)",
+    "3. The ONE most important issue or next step",
+    "4. A Socratic question (do not answer it yourself) that nudges them toward the fix",
+    "5. Whether they asked about something off-topic (outside their current exercise)",
+    "Be specific and reference actual line numbers or variable names from their code.",
+    "This output is for another AI, NOT for the student — be technical.",
+    "",
+    ctx.studentCode
+      ? `Student's code:\n\`\`\`python\n${truncate(ctx.studentCode, MAX_CODE_CHARS)}\n\`\`\``
+      : "Student has not written any code yet.",
+    ctx.codeOutput ? `Code output/error:\n${ctx.codeOutput}` : "",
+    ctx.lessonHeading ? `Current exercise: "${ctx.lessonHeading}"` : "",
+    ctx.lessonInstructions ? `Task: ${ctx.lessonInstructions}` : "",
+    ctx.lessonBody ? `Lesson context:\n${truncate(ctx.lessonBody, 600)}` : "",
+    ctx.hints ? `Available hints: ${ctx.hints}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Agent 2: K-12 simplifier — turns the analyst's output into a very short,
+ * kid-friendly message and streams it to the student.
+ */
+function buildSimplifierPrompt(ctx) {
+  return [
+    "You turn a technical coding analysis into a SHORT, friendly message for a middle school student (age 11-14) who is new to Python.",
+    "STRICT RULES — follow every one:",
+    "- MAXIMUM 3 sentences. MAXIMUM 60 words TOTAL. Count your words.",
+    "- Zero technical jargon. If you must use a Python keyword, give a one-word plain-English label after it in brackets.",
+    "- Start by acknowledging ONE specific thing from their code (show you read it).",
+    "- End with exactly ONE simple, friendly question to guide them forward — nothing else after the question.",
+    "- Be warm, fun, and encouraging. Celebrate small wins.",
+    "- NEVER paste code or give away the answer.",
+    "- NEVER suggest any topic or task outside their current exercise.",
+    "- If the analysis says the student asked about something off-topic, warmly redirect them back to their exercise in ≤2 sentences.",
+    ctx.lessonHeading ? `The student's current exercise is: "${ctx.lessonHeading}"` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * 2-agent async generator for student chat:
+ *   Agent 1 (non-streaming) → technical analysis
+ *   Agent 2 (streaming)     → K-12 simplified reply
+ */
+async function* getStudentChatStream(ctx, messages) {
+  const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+  const trimmed = messages.slice(-MAX_MESSAGES);
+
+  // Agent 1: technical analysis (non-streaming, internal)
+  const analystResult = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    messages: [
+      { role: "system", content: buildAnalystPrompt(ctx) },
+      // Include conversation history so Agent 1 sees what's been said
+      ...trimmed,
+    ],
+    max_tokens: 350,
+    temperature: 0.3,
+  });
+  const analysis = analystResult.choices[0]?.message?.content || "";
+
+  // Agent 2: simplifier (streaming, shown to student)
+  const studentMessage = trimmed[trimmed.length - 1]?.content || "";
+  const stream = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    messages: [
+      { role: "system", content: buildSimplifierPrompt(ctx) },
+      {
+        role: "user",
+        content: `Technical analysis to simplify:\n${analysis}\n\nStudent's message: "${studentMessage}"`,
+      },
+    ],
+    max_tokens: 120,
+    temperature: 0.5,
+    stream: true,
+  });
+
+  for await (const chunk of stream) {
+    const text = chunk.choices[0]?.delta?.content;
+    if (text) yield text;
+  }
+}
+
+// ── Phase 1 multi-agent schemas ────────────────────────────────────────────
+
+const JSON_SCHEMAS = {
+  "mcq-json": '{"title":"short label","question":"one question sentence","codeSnippet":"optional python","options":["A","B","C","D"],"answer":"A","explanation":"why correct"}',
+  "sa-json": '{"questions":[{"title":"short label","question":"question text","answer":"expected answer","gradingCriteria":"key points"}]}',
+  "practice-json": '{"title":"short title","body":"concept explanation","instructions":"one task sentence","hints":["hint"],"codeStarter":"# starter","modelAnswer":"# solution"}',
+  "learning-json": '{"title":"short label","body":"markdown lesson","instructions":"optional","hints":["optional"]}',
+  "lesson-plan-json": '{"planTitle":"title","topics":[{"title":"topic","items":[]}]}',
+};
+
+/**
+ * 1A — Auto-repair a malformed JSON fence block.
+ * Returns the corrected fence block string.
+ */
+export async function repairJsonContent(brokenContent, contentType) {
+  const schema = JSON_SCHEMAS[contentType] || "";
+  const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+  const response = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    messages: [
+      {
+        role: "system",
+        content: [
+          `Fix the broken JSON inside the \`\`\`${contentType} block to match this schema exactly:`,
+          schema,
+          `Output ONLY the corrected code fence starting with \`\`\`${contentType} and ending with \`\`\`. No other text.`,
+        ].join("\n"),
+      },
+      { role: "user", content: brokenContent },
+    ],
+    max_tokens: 800,
+    temperature: 0,
+  });
+  return response.choices[0]?.message?.content?.trim() || brokenContent;
+}
+
+/**
+ * 1B — Check if a student AI response stays on topic.
+ * Returns { onTopic: boolean, correctedResponse: string }
+ */
+export async function validateStudentResponse(response, lessonContext) {
+  const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+  const result = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    messages: [
+      {
+        role: "system",
+        content: [
+          "You are reviewing an AI tutor reply to a middle school student.",
+          lessonContext ? `Current exercise: ${lessonContext}` : "No exercise context.",
+          "Does this reply suggest exploring a NEW topic or activity outside the current exercise?",
+          'Respond with JSON only: {"onTopic":true,"correctedResponse":"..."}',
+          "If onTopic is true, correctedResponse equals the original. If false, rewrite it to warmly redirect the student back to their current exercise without mentioning anything new.",
+        ].join("\n"),
+      },
+      { role: "user", content: response },
+    ],
+    max_tokens: 300,
+    temperature: 0.1,
+  });
+  const text = result.choices[0]?.message?.content || "";
+  try {
+    const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");
+    return { onTopic: json.onTopic !== false, correctedResponse: json.correctedResponse || response };
+  } catch {
+    return { onTopic: true, correctedResponse: response };
+  }
+}
+
+/**
+ * 1C — Rate AI-generated educational content for quality.
+ * Returns { quality: 'good'|'fair'|'needs_review', issues: string[], gradeLevel: 'K5'|'K8'|'K12' }
+ */
+export async function rateContent(contentBlock) {
+  const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+  const result = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    messages: [
+      {
+        role: "system",
+        content: [
+          "Rate this AI-generated K-12 Python course content.",
+          'Output JSON only: {"quality":"good"|"fair"|"needs_review","issues":["..."],"gradeLevel":"K5"|"K8"|"K12"}',
+          "good=clear and age-appropriate. fair=minor issues. needs_review=confusing, too advanced, or has errors.",
+          "issues: up to 3 specific problems. Empty array if none.",
+        ].join("\n"),
+      },
+      { role: "user", content: contentBlock },
+    ],
+    max_tokens: 150,
+    temperature: 0.1,
+  });
+  const text = result.choices[0]?.message?.content || "";
+  try {
+    return JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");
+  } catch {
+    return { quality: "fair", issues: [], gradeLevel: "K8" };
+  }
 }
 
 /**
@@ -209,9 +512,23 @@ export async function explainError(errorMessage, code) {
  * using the OpenAI API.
  */
 export async function* getChatCompletionStream(role, context, messages) {
-  const systemPrompt = buildSystemPrompt(role, context);
-  const trimmed = messages.slice(-MAX_MESSAGES);
+  // Student: use the 2-agent pipeline (analyst → simplifier)
+  if (role === "student") {
+    yield* getStudentChatStream(context, messages);
+    return;
+  }
 
+  // Teacher: Agent 1 (curriculum analyst) → Agent 2 (streaming generator)
+  const trimmed = messages.slice(-MAX_MESSAGES);
+  const teacherMessage = trimmed[trimmed.length - 1]?.content || "";
+
+  // Agent 1: run only if the class has topics to compare against
+  if (context.classTopics?.length) {
+    const analysis = await runCurriculumAnalyst(context, teacherMessage);
+    if (analysis) context.curriculumAnalysis = analysis;
+  }
+
+  const systemPrompt = buildSystemPrompt(role, context);
   const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
   const stream = await openai.chat.completions.create({
     model: "gpt-4.1-mini",

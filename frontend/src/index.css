@@ -181,6 +181,16 @@ a:hover { text-decoration: underline; }
   background: var(--teacher-100);
   font-weight: 600;
 }
+.submit-confirm {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #16a34a;
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  border-radius: var(--r-sm);
+  padding: 4px 10px;
+  white-space: nowrap;
+}
 .ghost-button.danger {
   border-color: #fca5a5;
   color: var(--danger-text);
@@ -2204,6 +2214,12 @@ a:hover { text-decoration: underline; }
 }
 .chat-import-btn:hover { background: var(--teacher-500); color: #fff; border-color: var(--teacher-500); }
 
+/* 1C — Content quality badge */
+.quality-badge { font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; align-self: center; white-space: nowrap; }
+.quality-good    { background: #dcfce7; color: #16a34a; }
+.quality-fair    { background: #fef9c3; color: #ca8a04; }
+.quality-review  { background: #ffedd5; color: #ea580c; }
+
 .chat-input-bar {
   display: flex;
   gap: 8px;
@@ -2243,6 +2259,45 @@ a:hover { text-decoration: underline; }
 .chat-send:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .chat-error { color: var(--danger-text); font-size: 0.8rem; padding: 4px 0; }
+
+/* Chat empty-state guide (teacher only) */
+.chat-empty-guide {
+  padding: 10px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.chat-empty-guide-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0 0 2px;
+}
+.chat-guide-group { display: flex; flex-direction: column; gap: 5px; }
+.chat-guide-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.chat-guide-prompt {
+  text-align: left;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.chat-guide-prompt:hover {
+  background: var(--teacher-100);
+  border-color: var(--teacher-200);
+  color: var(--teacher-900);
+}
 
 /* Expanded chat panel — centered overlay */
 .chat-panel-expanded {
@@ -2599,4 +2654,787 @@ a:hover { text-decoration: underline; }
 
 @media (max-width: 500px) {
   .chat-panel { width: calc(100vw - 32px); right: 16px; bottom: 16px; }
+}
+
+/* ── Notebook Editor ─────────────────────────────────────────────────────── */
+
+.nb-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.nb-cell {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-raised);
+  transition: border-color var(--t-base), box-shadow var(--t-base);
+  position: relative;
+}
+.nb-cell > .nb-cell-controls {
+  border-radius: var(--r-md) 0 0 var(--r-md);
+}
+.nb-cell > .nb-cell-content {
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+}
+.nb-cell:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+.nb-cell:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.nb-cell-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 4px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-surface);
+  min-width: 38px;
+}
+
+.nb-ctrl-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+  transition: background var(--t-base), color var(--t-base);
+}
+.nb-ctrl-btn:hover:not(:disabled) {
+  background: var(--bg-sunken);
+  color: var(--accent);
+}
+.nb-ctrl-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+.nb-delete-btn:hover:not(:disabled) {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.nb-type-picker-wrap {
+  position: relative;
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
+.nb-cell-badge {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: var(--bg-sunken);
+  border-radius: 3px;
+  padding: 1px 3px;
+  white-space: nowrap;
+}
+
+.nb-cell-badge-btn {
+  border: none;
+  cursor: pointer;
+  transition: background var(--t-base), color var(--t-base);
+  display: block;
+  width: 100%;
+  text-align: center;
+}
+.nb-cell-badge-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.nb-type-dropdown {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: calc(100% + 4px);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  min-width: 80px;
+  overflow: hidden;
+}
+
+.nb-type-option {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  color: inherit;
+  transition: background var(--t-base);
+}
+.nb-type-option:hover {
+  background: var(--bg-sunken);
+}
+.nb-type-option-active {
+  color: var(--accent);
+}
+
+.nb-cell-content {
+  flex: 1;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  cursor: text;
+}
+.nb-cell-content:hover {
+  background: var(--bg-sunken);
+}
+.nb-cell:focus-within .nb-cell-content {
+  background: var(--bg-sunken);
+}
+
+.nb-cell-input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 14px;
+  color: inherit;
+  line-height: 1.5;
+  padding: 0;
+  cursor: text;
+  min-height: 1.6em;
+}
+.nb-cell-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+.nb-cell-input:focus {
+  outline: none;
+}
+
+/* Per-type styling */
+.nb-cell-h1 .nb-cell-input { font-size: 20px; font-weight: 700; }
+.nb-cell-h2 .nb-cell-input { font-size: 17px; font-weight: 600; }
+.nb-cell-h3 .nb-cell-input { font-size: 15px; font-weight: 600; }
+.nb-cell-bullet .nb-cell-content::before { content: "•"; margin-right: 6px; color: var(--text-secondary); align-self: flex-start; padding-top: 2px; }
+.nb-cell-bullet .nb-cell-content { flex-direction: row; align-items: flex-start; }
+.nb-cell-bullet .nb-cell-input { flex: 1; }
+
+.nb-cell-hint {
+  border-left: 3px solid #f59e0b;
+}
+.nb-cell-hint .nb-cell-badge { color: #b45309; background: #fef3c7; }
+
+.nb-cell-code {
+  background: var(--bg-sunken);
+}
+.nb-cell-code .nb-cell-content { padding: 0; }
+
+.nb-code-cell {
+  width: 100%;
+  min-height: 80px;
+}
+
+/* Add-block bar */
+.nb-add-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.nb-add-btn {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+}
+
+/* Label above notebook in lesson-field context */
+.lesson-field > .nb-editor {
+  margin-top: 6px;
+}
+
+/* ── Phase 6: Code Block Copy Button ── */
+.code-block-wrap {
+  position: relative;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 3px 10px;
+  font-size: 11px;
+  border-radius: var(--r-pill);
+  background: rgba(255,255,255,0.12);
+  color: #ccc;
+  border: 1px solid rgba(255,255,255,0.18);
+  cursor: pointer;
+  transition: background var(--t-base), color var(--t-base);
+  z-index: 2;
+}
+
+.code-copy-btn:hover {
+  background: rgba(255,255,255,0.22);
+  color: #fff;
+}
+
+/* ── Phase 6: Key Concept Callout ── */
+.callout-block {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-surface));
+  border-left: 4px solid var(--accent);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding: 14px 16px;
+  margin: 16px 0;
+}
+
+.callout-icon {
+  font-size: 20px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+.callout-block strong {
+  display: block;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.callout-block p {
+  margin: 0;
+  font-size: 14px;
+}
+
+/* Callout cell style in notebook editor */
+.nb-cell-callout .nb-cell-input {
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-surface));
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+}
+
+/* ── Phase 6: Animated Hint Reveal ── */
+@keyframes hint-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.learning-hint-item {
+  animation: hint-slide-in 0.25s ease forwards;
+}
+
+/* ── Phase 6: Step Indicator ── */
+.step-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+  padding: 10px 14px;
+  background: var(--bg-raised);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+}
+
+.step-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--t-base), border-color var(--t-base), color var(--t-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.step-dot:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.step-dot-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.step-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+
+/* ── Phase 7: Item Pagination Bar ── */
+.item-pagination-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 24px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+
+.item-pagination-bar--workspace {
+  padding: 8px 32px;
+}
+
+.item-pagination-pos {
+  font-size: 13px;
+  color: var(--text-secondary);
+  min-width: 60px;
+  text-align: center;
+}
+
+.item-pagination-bar .ghost-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* ── Phase 4: Teacher Stats ── */
+.class-tab-bar {
+  display: flex;
+  gap: 4px;
+  padding: 0 0 16px 0;
+}
+
+.class-tab {
+  padding: 8px 20px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--t-base), color var(--t-base), border-color var(--t-base);
+}
+
+.class-tab:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.class-tab-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.class-stats-section {
+  padding: 8px 0;
+}
+
+.stats-cards {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 28px;
+}
+
+.stat-card {
+  flex: 1;
+  min-width: 100px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.stat-number {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.stats-quiz-section h3 {
+  margin-bottom: 6px;
+}
+
+.stats-meta {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.stats-bar-wrap {
+  display: flex;
+  height: 16px;
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  background: var(--bg-raised);
+  margin-bottom: 10px;
+}
+
+.stats-bar-segment {
+  height: 100%;
+  transition: width 0.4s ease;
+}
+
+.stats-bar-correct   { background: #4caf50; }
+.stats-bar-incorrect { background: #f44336; }
+.stats-bar-pending   { background: #ff9800; }
+
+.stats-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 4px;
+}
+
+.legend-correct   { background: #4caf50; }
+.legend-incorrect { background: #f44336; }
+.legend-pending   { background: #ff9800; }
+
+/* ── Phase 4: Advanced Stats Tables ── */
+.stats-table-section {
+  margin-top: 28px;
+}
+
+.stats-table-section h3 {
+  margin-bottom: 4px;
+}
+
+.stats-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  margin-top: 10px;
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.stats-table th {
+  background: var(--bg-raised);
+  padding: 10px 12px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.stats-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+
+.stats-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.stats-table tbody tr:hover td {
+  background: var(--bg-raised);
+}
+
+.stats-student-name {
+  font-weight: 500;
+}
+
+.stats-rate-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rate-good { background: #e8f5e9; color: #2e7d32; }
+.rate-mid  { background: #fff8e1; color: #f57f17; }
+.rate-low  { background: #ffebee; color: #c62828; }
+
+.stats-mini-bar {
+  width: 80px;
+  height: 6px;
+  background: var(--bg-raised);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+
+.stats-mini-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--r-pill);
+  transition: width 0.3s ease;
+}
+
+/* Student Stats Page */
+.sd-status-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sd-correct   { background: #e8f5e9; color: #2e7d32; }
+.sd-incorrect { background: #ffebee; color: #c62828; }
+.sd-pending   { background: #fff8e1; color: #f57f17; }
+.sd-none      { background: var(--bg-raised); color: var(--text-secondary); }
+
+.sd-response-cell { max-width: 220px; }
+
+.sd-response-text {
+  font-family: "Space Grotesk", monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.stats-student-link {
+  cursor: pointer;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.stats-student-link:hover {
+  opacity: 0.75;
+}
+
+.diff-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.diff-easy { background: #e8f5e9; color: #2e7d32; }
+.diff-mid  { background: #fff8e1; color: #f57f17; }
+.diff-hard { background: #ffebee; color: #c62828; }
+
+/* Gradebook */
+.gradebook-wrap {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.gradebook-table th,
+.gradebook-table td {
+  text-align: center;
+  padding: 8px 6px;
+}
+
+.gb-student-col {
+  text-align: left !important;
+  min-width: 120px;
+  position: sticky;
+  left: 0;
+  background: var(--bg-surface);
+  z-index: 1;
+}
+
+.gradebook-table th.gb-student-col {
+  background: var(--bg-raised);
+}
+
+.gb-item-col {
+  min-width: 60px;
+  max-width: 90px;
+}
+
+.gb-item-label {
+  display: block;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.gb-cell {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.gb-correct   { background: #e8f5e9; color: #2e7d32; }
+.gb-incorrect { background: #ffebee; color: #c62828; }
+.gb-pending   { background: #fff8e1; color: #f57f17; }
+.gb-none      { background: var(--bg-raised); color: var(--text-secondary); }
+
+.gb-score {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.gb-legend-cell {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  vertical-align: middle;
+  margin-right: 3px;
+}
+
+/* ── Phase 5: Student Progress ── */
+.dashboard-summary {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+  border-radius: var(--r-md);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dashboard-summary-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.class-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color var(--t-base), box-shadow var(--t-base);
+}
+
+.class-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.class-card-body {
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.class-card-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.class-progress-bar {
+  height: 6px;
+  background: var(--bg-raised);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+
+.class-progress-bar--lg {
+  height: 10px;
+  margin: 6px 0;
+}
+
+.class-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--r-pill);
+  transition: width 0.4s ease;
+}
+
+.class-progress-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.class-continue-btn {
+  align-self: flex-start;
+  font-size: 13px;
+  padding: 6px 14px;
+}
+
+.class-progress-summary {
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+  border-radius: var(--r-md);
+  padding: 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.class-progress-summary-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.class-progress-summary-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.class-progress-fraction {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.class-progress-done {
+  font-size: 14px;
+  color: #4caf50;
+  font-weight: 500;
 }

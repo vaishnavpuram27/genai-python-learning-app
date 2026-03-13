@@ -167,7 +167,7 @@ function parseLessonPlanFromMessage(content) {
 }
 
 function parseLearningFromMessage(content) {
-  const match = content.match(/```learning-json\s*\n([\s\S]*)\n```/);
+  const match = content.match(/```learning-json\s*\n([\s\S]*?)\n```/);
   if (!match) return null;
   try {
     const parsed = JSON.parse(match[1].trim());
@@ -182,6 +182,36 @@ function parseLearningFromMessage(content) {
   } catch {
     return null;
   }
+}
+
+function parseAllLearningFromMessage(content) {
+  const regex = /```learning-json\s*\n([\s\S]*?)\n```/g;
+  const items = [];
+  let match;
+  while ((match = regex.exec(content)) !== null) {
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      if (parsed.title) {
+        items.push({
+          title: parsed.title || "",
+          body: parsed.body || "",
+          instructions: parsed.instructions || "",
+          hints: Array.isArray(parsed.hints) ? parsed.hints : [],
+          codeStarter: parsed.codeStarter || "",
+        });
+      }
+    } catch { /* skip malformed blocks */ }
+  }
+  return items;
+}
+
+function countFences(content, fenceType) {
+  return (content.match(new RegExp("```" + fenceType, "g")) || []).length;
+}
+
+// Returns true if a chat message contains a given JSON fence type (even if malformed)
+function hasFence(content, fenceType) {
+  return typeof content === "string" && content.includes("```" + fenceType);
 }
 
 function mapLessonFromApi(lesson) {
@@ -251,6 +281,258 @@ function PageShell({ className, children }) {
   return <div className={className}>{children}</div>;
 }
 
+// ── Notebook Editor ─────────────────────────────────────────────────────────
+
+const genCellId = () =>
+  globalThis.crypto?.randomUUID?.() ||
+  `cell-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+function parseBodyToCells(body = "", hints = []) {
+  const cells = [];
+  const lines = (body || "").split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.startsWith(":::callout")) {
+      const contentLines = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith(":::")) {
+        contentLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing :::
+      cells.push({ id: genCellId(), type: "callout", content: contentLines.join("\n") });
+      continue;
+    }
+    if (line.startsWith("```")) {
+      const codeLines = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith("```")) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++;
+      cells.push({ id: genCellId(), type: "code", content: codeLines.join("\n") });
+      continue;
+    }
+    if (line.startsWith("### ")) {
+      cells.push({ id: genCellId(), type: "h3", content: line.slice(4) });
+      i++; continue;
+    }
+    if (line.startsWith("## ")) {
+      cells.push({ id: genCellId(), type: "h2", content: line.slice(3) });
+      i++; continue;
+    }
+    if (line.startsWith("# ")) {
+      cells.push({ id: genCellId(), type: "h1", content: line.slice(2) });
+      i++; continue;
+    }
+    if (line.startsWith("- ") || line.startsWith("* ")) {
+      cells.push({ id: genCellId(), type: "bullet", content: line.slice(2) });
+      i++; continue;
+    }
+    if (line.trim() === "") { i++; continue; }
+    const textLines = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !lines[i].startsWith("#") &&
+      !lines[i].startsWith("```") &&
+      !lines[i].startsWith(":::") &&
+      !lines[i].startsWith("- ") &&
+      !lines[i].startsWith("* ")
+    ) {
+      textLines.push(lines[i]);
+      i++;
+    }
+    if (textLines.length > 0)
+      cells.push({ id: genCellId(), type: "text", content: textLines.join("\n") });
+  }
+  (hints || []).forEach((h) => {
+    if (h) cells.push({ id: genCellId(), type: "hint", content: h });
+  });
+  if (cells.length === 0)
+    cells.push({ id: genCellId(), type: "text", content: "" });
+  return cells;
+}
+
+function serializeCellsToBody(cells) {
+  const bodyCells = cells.filter((c) => c.type !== "hint");
+  const hintCells = cells.filter((c) => c.type === "hint");
+  const parts = bodyCells.map((cell) => {
+    switch (cell.type) {
+      case "h1": return `# ${cell.content}`;
+      case "h2": return `## ${cell.content}`;
+      case "h3": return `### ${cell.content}`;
+      case "bullet": return `- ${cell.content}`;
+      case "code": return `\`\`\`python\n${cell.content}\n\`\`\``;
+      case "callout": return `:::callout\n${cell.content}\n:::`;
+      default: return cell.content;
+    }
+  });
+  return {
+    body: parts.filter((p) => p.trim()).join("\n\n"),
+    hints: hintCells.map((c) => c.content).filter(Boolean),
+  };
+}
+
+function NbCodeCell({ value, onChange }) {
+  const containerRef = useRef(null);
+  const editorRef = useRef(null);
+  useEffect(() => {
+    function mount(retries = 0) {
+      if (!window.ace || !containerRef.current) {
+        if (retries < 20) setTimeout(() => mount(retries + 1), 150);
+        return;
+      }
+      if (editorRef.current) return;
+      const ed = window.ace.edit(containerRef.current);
+      ed.setTheme("ace/theme/tomorrow_night");
+      ed.session.setMode("ace/mode/python");
+      ed.setOptions({ minLines: 3, maxLines: 12, showPrintMargin: false, fontSize: "13px", tabSize: 4, useSoftTabs: true, wrap: true });
+      ed.setValue(value || "", -1);
+      ed.on("change", () => onChange(ed.getValue()));
+      editorRef.current = ed;
+    }
+    mount();
+    return () => {
+      if (editorRef.current) { editorRef.current.destroy(); editorRef.current = null; }
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (ed && ed.getValue() !== value) ed.setValue(value || "", -1);
+  }, [value]);
+  return <div ref={containerRef} className="nb-code-cell" />;
+}
+
+// Phase 6 — code block copy button wrapper for ReactMarkdown
+function CopyPre({ children, ...props }) {
+  const [copied, setCopied] = useState(false);
+  const preRef = useRef(null);
+  function handleCopy() {
+    const text = preRef.current?.innerText || "";
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+  return (
+    <div className="code-block-wrap">
+      <button className="code-copy-btn" type="button" onClick={handleCopy}>
+        {copied ? "Copied!" : "Copy"}
+      </button>
+      <pre ref={preRef} {...props}>{children}</pre>
+    </div>
+  );
+}
+const MD_COMPONENTS = { pre: CopyPre };
+
+const NB_PLACEHOLDERS = { text: "Write your explanation here…", h1: "Heading 1", h2: "Heading 2", h3: "Heading 3", bullet: "Bullet point", hint: "Hint text…", callout: "Key concept text…" };
+const NB_LABELS = { text: "Text", h1: "H1", h2: "H2", h3: "H3", bullet: "•", code: "Code", hint: "Hint", callout: "Callout" };
+
+function NbCellRow({ cell, isFirst, isLast, onUpdate, onDelete, onMove, onChangeType, availableTypes }) {
+  const [typePickerOpen, setTypePickerOpen] = useState(false);
+  return (
+    <div className={`nb-cell nb-cell-${cell.type}`}>
+      <div className="nb-cell-controls">
+        <button className="nb-ctrl-btn" disabled={isFirst} onClick={() => onMove(-1)} title="Move up">↑</button>
+        <button className="nb-ctrl-btn" disabled={isLast} onClick={() => onMove(1)} title="Move down">↓</button>
+        <div className="nb-type-picker-wrap">
+          <button
+            className="nb-cell-badge nb-cell-badge-btn"
+            title="Change block type"
+            onClick={() => setTypePickerOpen((o) => !o)}
+          >
+            {NB_LABELS[cell.type]} ▾
+          </button>
+          {typePickerOpen && (
+            <div className="nb-type-dropdown">
+              {availableTypes.map(({ type, label }) => (
+                <button
+                  key={type}
+                  className={`nb-type-option${cell.type === type ? " nb-type-option-active" : ""}`}
+                  onClick={() => { onChangeType(type); setTypePickerOpen(false); }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <button className="nb-ctrl-btn nb-delete-btn" onClick={onDelete} title="Delete">×</button>
+      </div>
+      <div className="nb-cell-content">
+        {cell.type === "code" ? (
+          <NbCodeCell value={cell.content} onChange={onUpdate} />
+        ) : (
+          <textarea
+            className="nb-cell-input"
+            value={cell.content}
+            rows={["h1", "h2", "h3"].includes(cell.type) ? 1 : 2}
+            placeholder={NB_PLACEHOLDERS[cell.type] || ""}
+            onChange={(e) => onUpdate(e.target.value)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+const NB_BLOCK_TYPES = [
+  { type: "text", label: "Text" },
+  { type: "h1", label: "H1" },
+  { type: "h2", label: "H2" },
+  { type: "h3", label: "H3" },
+  { type: "bullet", label: "Bullet" },
+  { type: "code", label: "Code" },
+  { type: "callout", label: "Callout" },
+];
+
+function NotebookEditor({ cells, onChange, withHints = false }) {
+  function addCell(type) { onChange([...cells, { id: genCellId(), type, content: "" }]); }
+  function updateCell(id, content) { onChange(cells.map((c) => (c.id === id ? { ...c, content } : c))); }
+  function changeType(id, type) { onChange(cells.map((c) => (c.id === id ? { ...c, type } : c))); }
+  function deleteCell(id) {
+    const next = cells.filter((c) => c.id !== id);
+    onChange(next.length ? next : [{ id: genCellId(), type: "text", content: "" }]);
+  }
+  function moveCell(id, dir) {
+    const idx = cells.findIndex((c) => c.id === id);
+    if (idx + dir < 0 || idx + dir >= cells.length) return;
+    const next = [...cells];
+    [next[idx], next[idx + dir]] = [next[idx + dir], next[idx]];
+    onChange(next);
+  }
+  const blockTypes = withHints ? [...NB_BLOCK_TYPES, { type: "hint", label: "Hint" }] : NB_BLOCK_TYPES;
+  return (
+    <div className="nb-editor">
+      {cells.map((cell, idx) => (
+        <NbCellRow
+          key={cell.id}
+          cell={cell}
+          isFirst={idx === 0}
+          isLast={idx === cells.length - 1}
+          onUpdate={(content) => updateCell(cell.id, content)}
+          onDelete={() => deleteCell(cell.id)}
+          onMove={(dir) => moveCell(cell.id, dir)}
+          onChangeType={(type) => changeType(cell.id, type)}
+          availableTypes={blockTypes}
+        />
+      ))}
+      <div className="nb-add-bar">
+        {blockTypes.map(({ type, label }) => (
+          <button key={type} className="nb-add-btn ghost-button" onClick={() => addCell(type)}>
+            + {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── End Notebook Editor ──────────────────────────────────────────────────────
+
 function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE, onSaved, setToast }) {
   const hasContent = !!(meta.practiceBody || meta.practiceCodeStarter);
   const hints = Array.isArray(meta.practiceHints) ? meta.practiceHints : [];
@@ -258,13 +540,17 @@ function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE,
 
   // Edit-mode state
   const [editing, setEditing] = useState(!hasContent && isTeacher);
-  const [body, setBody] = useState(meta.practiceBody || "");
+  const [cells, setCells] = useState(() => parseBodyToCells(meta.practiceBody || ""));
   const [instructions, setInstructions] = useState(meta.practiceInstructions || "");
   const [codeStarter, setCodeStarter] = useState(meta.practiceCodeStarter || "");
   const [saving, setSaving] = useState(false);
 
   // Hints reveal state
   const [hintsRevealed, setHintsRevealed] = useState(0); // number of hints shown
+
+  // Phase 6 — view-mode cells (separate from edit cells so they always reflect saved content)
+  const viewCells = useMemo(() => parseBodyToCells(meta.practiceBody || ""), [meta.practiceBody]);
+  const sectionRefs = useRef({});
 
   // Mini code editor + console state
   const miniInitialCode = meta.practiceCodeStarter || "# Write your Python code here\n";
@@ -274,8 +560,10 @@ function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE,
   const miniEditorHostRef = useRef(null);
   const miniEditorRef = useRef(null);
 
-  // Initialize Ace editor in the mini host div
+  // Initialize Ace editor in the mini host div — re-run when editing toggles
+  // so the editor mounts after the host div becomes visible (view mode)
   useEffect(() => {
+    if (editing) return; // host div not in DOM while editing
     function mountAce(retries = 0) {
       if (!window.ace || !miniEditorHostRef.current) {
         if (retries < 20) setTimeout(() => mountAce(retries + 1), 150);
@@ -306,7 +594,7 @@ function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE,
         miniEditorRef.current = null;
       }
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [editing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function skRead(x) {
     if (window.Sk?.builtinFiles?.files?.[x] === undefined) throw new Error(`File not found: '${x}'`);
@@ -338,6 +626,7 @@ function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE,
 
   async function handleSave() {
     setSaving(true);
+    const { body: newBody } = serializeCellsToBody(cells);
     try {
       const res = await fetch(
         `${API_BASE}/classes/${activeClassId}/topics/${meta.topic?.id}/items/${meta.id}`,
@@ -347,14 +636,14 @@ function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE,
           body: JSON.stringify({
             title: meta.title,
             type: "learning",
-            practiceBody: body,
+            practiceBody: newBody,
             practiceInstructions: instructions,
             practiceCodeStarter: codeStarter,
           }),
         }
       );
       if (res.ok) {
-        onSaved({ practiceBody: body, practiceInstructions: instructions, practiceCodeStarter: codeStarter });
+        onSaved({ practiceBody: newBody, practiceInstructions: instructions, practiceCodeStarter: codeStarter });
         setEditing(false);
         setToast({ type: "success", message: "Lesson content saved!" });
       } else {
@@ -377,13 +666,7 @@ function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE,
         /* ── Teacher edit form ───────────────────────────── */
         <div className="learning-edit-inline">
           <label className="learning-edit-label">Lesson Body</label>
-          <textarea
-            className="learning-edit-textarea"
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            placeholder="Explain the concept in plain language (K-12 friendly)…"
-            rows={8}
-          />
+          <NotebookEditor cells={cells} onChange={setCells} />
           <label className="learning-edit-label">Try-it Instructions (optional)</label>
           <input
             className="learning-edit-input"
@@ -421,12 +704,53 @@ function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE,
             </div>
           ) : (
             <>
-              {/* Main lesson body */}
+              {/* Main lesson body — cell-by-cell rendering (Phase 6) */}
               {meta.practiceBody && (
                 <div className="learning-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                    {meta.practiceBody}
-                  </ReactMarkdown>
+                  {viewCells.filter((c) => c.type !== "hint").map((cell) => {
+                    switch (cell.type) {
+                      case "h1": return <h1 key={cell.id}>{cell.content}</h1>;
+                      case "h2": return (
+                        <h2
+                          key={cell.id}
+                          id={`section-${cell.id}`}
+                          ref={(el) => { sectionRefs.current[cell.id] = el; }}
+                        >
+                          {cell.content}
+                        </h2>
+                      );
+                      case "h3": return <h3 key={cell.id}>{cell.content}</h3>;
+                      case "bullet": return <ul key={cell.id}><li>{cell.content}</li></ul>;
+                      case "code": return (
+                        <ReactMarkdown
+                          key={cell.id}
+                          remarkPlugins={[remarkGfm]}
+                          rehypePlugins={[rehypeHighlight]}
+                          components={MD_COMPONENTS}
+                        >
+                          {`\`\`\`python\n${cell.content}\n\`\`\``}
+                        </ReactMarkdown>
+                      );
+                      case "callout": return (
+                        <div key={cell.id} className="callout-block">
+                          <span className="callout-icon">💡</span>
+                          <div>
+                            <strong>Key Concept</strong>
+                            <p>{cell.content}</p>
+                          </div>
+                        </div>
+                      );
+                      default: return (
+                        <ReactMarkdown
+                          key={cell.id}
+                          remarkPlugins={[remarkGfm]}
+                          components={MD_COMPONENTS}
+                        >
+                          {cell.content}
+                        </ReactMarkdown>
+                      );
+                    }
+                  })}
                 </div>
               )}
 
@@ -493,7 +817,7 @@ function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE,
               {/* Teacher-only Edit button */}
               {isTeacher && (
                 <button className="ghost-button learning-edit-btn" onClick={() => {
-                  setBody(meta.practiceBody || "");
+                  setCells(parseBodyToCells(meta.practiceBody || ""));
                   setInstructions(meta.practiceInstructions || "");
                   setCodeStarter(meta.practiceCodeStarter || "");
                   setEditing(true);
@@ -539,6 +863,15 @@ export default function App() {
   const [studentQuizAttempts, setStudentQuizAttempts] = useState([]);
   const [studentProgressError, setStudentProgressError] = useState("");
   const [studentProgressLoading, setStudentProgressLoading] = useState(false);
+  // Phase 4 — teacher stats
+  const [classTab, setClassTab] = useState("topics");
+  const [classStats, setClassStats] = useState(null);
+  const [classStatsLoading, setClassStatsLoading] = useState(false);
+  const [studentStatsData, setStudentStatsData] = useState(null);
+  const [studentStatsLoading, setStudentStatsLoading] = useState(false);
+  // Phase 5 — student progress
+  const [myClassProgress, setMyClassProgress] = useState(null);
+  const [allClassProgress, setAllClassProgress] = useState({});
   const [selectedProgress, setSelectedProgress] = useState(null);
   const [selectedQuizAttempt, setSelectedQuizAttempt] = useState(null);
   const [quizGradeFeedback, setQuizGradeFeedback] = useState("");
@@ -571,6 +904,7 @@ export default function App() {
   const [quizResponse, setQuizResponse] = useState("");
   const [quizAttempt, setQuizAttempt] = useState(null);
   const [quizSubmitting, setQuizSubmitting] = useState(false);
+  const [practiceSubmitted, setPracticeSubmitted] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
   const [chatAnimDir, setChatAnimDir] = useState(null); // "expanding" | "collapsing" | "fadein" | null
@@ -605,6 +939,11 @@ export default function App() {
   const [importLearningNewTopic, setImportLearningNewTopic] = useState("");
   const [importLearningSaving, setImportLearningSaving] = useState(false);
   const [importLearningError, setImportLearningError] = useState("");
+  const [importLearningAll, setImportLearningAll] = useState(null); // array of items for bulk import
+  const [importLearningAllTopicId, setImportLearningAllTopicId] = useState("");
+  const [importLearningAllNewTopic, setImportLearningAllNewTopic] = useState("");
+  const [importLearningAllSaving, setImportLearningAllSaving] = useState(false);
+  const [importLearningAllError, setImportLearningAllError] = useState("");
   const [testResults, setTestResults] = useState(null);
   const [testRunning, setTestRunning] = useState(false);
   const [errorExplanation, setErrorExplanation] = useState(null);
@@ -624,6 +963,9 @@ export default function App() {
     testMode: false,
     testCases: [],
   }));
+  const [nbCells, setNbCells] = useState(() =>
+    parseBodyToCells(initialLesson.body || "", initialLesson.hints || [])
+  );
 
 
   const editorRef = useRef(null);
@@ -644,6 +986,17 @@ export default function App() {
   const activeClass = useMemo(() => {
     return classes.find((item) => item.id === activeClassId) || classes[0] || null;
   }, [classes, activeClassId]);
+
+  // Phase 7 — flat ordered list of all topic items for Prev/Next pagination
+  const itemNavList = useMemo(() => {
+    return topics.flatMap((t) =>
+      (t.items || []).map((item) => ({ id: item.id, type: item.type, topicId: t.id }))
+    );
+  }, [topics]);
+
+  const navIndex = route.itemId ? itemNavList.findIndex((i) => i.id === route.itemId) : -1;
+  const navPrev = navIndex > 0 ? itemNavList[navIndex - 1] : null;
+  const navNext = navIndex >= 0 && navIndex < itemNavList.length - 1 ? itemNavList[navIndex + 1] : null;
 
   const [lessonJson, setLessonJson] = useState(
     JSON.stringify(lesson, null, 2)
@@ -741,7 +1094,8 @@ export default function App() {
   }, [user, activeClassId, route.page, studentsRefreshKey]);
 
   useEffect(() => {
-    if (!user || !activeClassId || route.page !== "class") {
+    const itemPages = ["class", "learn", "quiz", "practice"];
+    if (!user || !activeClassId || !itemPages.includes(route.page)) {
       setTopics([]);
       return;
     }
@@ -766,6 +1120,102 @@ export default function App() {
       cancelled = true;
     };
   }, [user, activeClassId, route.page]);
+
+  // Phase 4 — reset classTab + stats when class changes
+  useEffect(() => {
+    setClassTab("topics");
+    setClassStats(null);
+    setMyClassProgress(null);
+  }, [activeClassId]);
+
+  // Phase 4 — fetch teacher stats when Stats tab is active
+  useEffect(() => {
+    if (!user || user.role !== "teacher" || !activeClassId || classTab !== "stats") return;
+    let cancelled = false;
+    setClassStatsLoading(true);
+    async function fetchStats() {
+      try {
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/stats`, {
+          headers: { ...authHeaders() },
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setClassStats(data?.data || null);
+      } catch { /* ignore */ } finally {
+        if (!cancelled) setClassStatsLoading(false);
+      }
+    }
+    fetchStats();
+    return () => { cancelled = true; };
+  }, [user, activeClassId, classTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // student-stats page data fetch
+  useEffect(() => {
+    if (!user || route.page !== "student-stats" || !activeClassId || !route.studentId) {
+      setStudentStatsData(null);
+      return;
+    }
+    let cancelled = false;
+    setStudentStatsLoading(true);
+    async function fetchStudentStats() {
+      try {
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/students/${route.studentId}/stats`, {
+          headers: { ...authHeaders() },
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setStudentStatsData(data?.data || null);
+      } catch { /* ignore */ } finally {
+        if (!cancelled) setStudentStatsLoading(false);
+      }
+    }
+    fetchStudentStats();
+    return () => { cancelled = true; };
+  }, [user, route.page, activeClassId, route.studentId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Phase 5 — fetch student's own progress for current class
+  useEffect(() => {
+    if (!user || user.role !== "student" || !activeClassId || route.page !== "class") {
+      return;
+    }
+    let cancelled = false;
+    async function fetchMyProgress() {
+      try {
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/my-progress`, {
+          headers: { ...authHeaders() },
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setMyClassProgress(data?.data || null);
+      } catch { /* ignore */ }
+    }
+    fetchMyProgress();
+    return () => { cancelled = true; };
+  }, [user, activeClassId, route.page]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Phase 5 — fetch progress for all enrolled classes (student classes page)
+  useEffect(() => {
+    if (!user || user.role !== "student" || route.page !== "classes" || !classes.length) return;
+    let cancelled = false;
+    async function fetchAll() {
+      const results = await Promise.allSettled(
+        classes.map((c) =>
+          fetch(`${API_BASE}/classes/${c.id}/my-progress`, { headers: { ...authHeaders() } })
+            .then((r) => r.ok ? r.json() : null)
+            .then((d) => ({ classId: c.id, data: d?.data || null }))
+            .catch(() => ({ classId: c.id, data: null }))
+        )
+      );
+      if (cancelled) return;
+      const map = {};
+      for (const r of results) {
+        if (r.status === "fulfilled" && r.value?.data) map[r.value.classId] = r.value.data;
+      }
+      setAllClassProgress(map);
+    }
+    fetchAll();
+    return () => { cancelled = true; };
+  }, [user, route.page, classes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!user || !activeClassId || route.page !== "student" || !route.studentId) {
@@ -915,6 +1365,11 @@ export default function App() {
       setSelectedProgress(null);
       return;
     }
+    if (route.page === "student-stats") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(null);
+      return;
+    }
     setActiveClassId(null);
     setActiveLessonId(null);
   }, [route]);
@@ -959,6 +1414,7 @@ export default function App() {
       setPracticeError("");
       return;
     }
+    setPracticeSubmitted(false);
     let cancelled = false;
 
     async function fetchPractice() {
@@ -979,6 +1435,9 @@ export default function App() {
           itemTitle: item?.title || "Practice Item",
           topicTitle: item?.topic?.title || "Practice",
         });
+        const submittedCode = item?.submittedCode || null;
+        const codeStarter = item?.practiceCodeStarter ?? "";
+        console.log("[fetchPractice] submittedCode:", submittedCode ? `${submittedCode.length} chars` : "null", "codeStarter:", codeStarter ? `${codeStarter.length} chars` : "empty");
         setPracticeDraft((prev) => ({
           ...prev,
           unit: item?.topic?.title || prev.unit,
@@ -991,9 +1450,18 @@ export default function App() {
           modelAnswer: item?.practiceModelAnswer ?? prev.modelAnswer,
           testMode: item?.practiceTestMode ?? prev.testMode,
           testCases: item?.practiceTestCases ?? prev.testCases,
+          submittedCode,
           _itemId: item?.id || route.itemId,
           _topicId: item?.topic?.id || "",
         }));
+        // Directly set the editor to submitted code if available,
+        // bypassing the sync useEffect which may fire before the editor is initialized.
+        const editorCode = viewRole === "student" && submittedCode ? submittedCode : codeStarter;
+        codeStarterRef.current = editorCode;
+        if (editorRef.current?.setValue) {
+          editorRef.current.setValue(editorCode, -1);
+        }
+        if (submittedCode) setPracticeSubmitted(true);
         setTestResults(null);
       } catch {
         if (cancelled) return;
@@ -1007,6 +1475,13 @@ export default function App() {
       cancelled = true;
     };
   }, [user, route.page, route.itemId, activeClassId]);
+
+  // Sync notebook cells when practice item loads from server
+  useEffect(() => {
+    if (route.page === "practice" && practiceDraft._itemId) {
+      setNbCells(parseBodyToCells(practiceDraft.body || "", practiceDraft.hints || []));
+    }
+  }, [practiceDraft._itemId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!user || route.page !== "quiz" || !route.itemId || !activeClassId) {
@@ -1313,14 +1788,19 @@ export default function App() {
   }, [user, isLessonRoute, viewRole, activeClassId, route.page]);
 
   useEffect(() => {
-    codeStarterRef.current = lesson.codeStarter;
-    // On the practice page load the code starter for both teacher and student.
+    // For students on the practice page: prefer their submitted code over the starter.
+    const editorValue =
+      route.page === "practice" && viewRole === "student" && lesson.submittedCode
+        ? lesson.submittedCode
+        : lesson.codeStarter;
+    codeStarterRef.current = editorValue;
+    // On the practice page load the code for both teacher and student.
     // On regular lesson pages only sync for the teacher (students keep their own code).
     const shouldSync = viewRole === "teacher" || route.page === "practice";
     if (shouldSync && editorRef.current?.setValue) {
-      editorRef.current.setValue(lesson.codeStarter || "", -1);
+      editorRef.current.setValue(editorValue || "", -1);
     }
-  }, [lesson.codeStarter, viewRole, route.page]);
+  }, [lesson.codeStarter, lesson.submittedCode, viewRole, route.page]);
 
   function updateActiveLesson(updater) {
     if (route.page === "practice") {
@@ -1371,6 +1851,18 @@ export default function App() {
   function navigateToLearningItem(classId, itemId) {
     window.history.pushState({}, "", `/classes/${classId}/learn/${itemId}`);
     setRoute({ page: "learn", classId, itemId, lessonId: null, studentId: null });
+  }
+
+  function navigateToStudentStats(classId, studentId) {
+    window.history.pushState({}, "", `/classes/${classId}/students/${studentId}/stats`);
+    setRoute({ page: "student-stats", classId, studentId, lessonId: null, itemId: null });
+  }
+
+  function navigateToItem(classId, navItem) {
+    if (!navItem) return;
+    if (navItem.type === "practice") navigateToPractice(classId, navItem.id);
+    else if (navItem.type === "quiz") navigateToQuiz(classId, navItem.id);
+    else navigateToLearningItem(classId, navItem.id);
   }
 
   function handleSelectClass(id) {
@@ -2035,22 +2527,26 @@ export default function App() {
   }
 
   async function submitLesson() {
-    const lessonId = activeLessonIdRef.current;
-    if (!user || !lessonId || !isMongoObjectId(lessonId)) return;
+    if (!user || !activeClassId || !route.itemId) return;
 
+    const code = editorRef.current?.getValue?.() || "";
     try {
-      await fetch(`${API_BASE}/progress/${lessonId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          ...authHeaders(),
-        },
-        body: JSON.stringify({
-          status: "completed",
-          completedAt: new Date().toISOString(),
-        }),
-      });
-      setToast({ type: "success", message: "Lesson submitted" });
+      const res = await fetch(
+        `${API_BASE}/classes/${activeClassId}/quiz/${route.itemId}/attempt`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ responseText: code }),
+        }
+      );
+      if (!res.ok) throw new Error("Failed");
+      setPracticeSubmitted(true);
+      // Immediately update practiceDraft so the submitted code persists
+      // in the current session without needing a full page reload.
+      if (code) {
+        setPracticeDraft((prev) => ({ ...prev, submittedCode: code }));
+      }
+      setToast({ type: "success", message: "Code submitted!" });
     } catch {
       setToast({ type: "error", message: "Submission failed" });
     }
@@ -2143,6 +2639,27 @@ export default function App() {
     }
   }, [chatMessages]);
 
+  // 1A: Try to parse import content; if malformed, auto-repair via backend then re-parse
+  async function repairAndImport(content, contentType, parseFn, onSuccess) {
+    const direct = parseFn(content);
+    if (direct) { onSuccess(direct); return; }
+    setToast({ type: "success", message: "Fixing JSON…" });
+    try {
+      const res = await fetch(`${API_BASE}/chat/repair-json`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ brokenContent: content, contentType }),
+      });
+      if (!res.ok) throw new Error("Repair failed");
+      const { data } = await res.json();
+      const fixed = parseFn(data.fixed);
+      if (fixed) { onSuccess(fixed); return; }
+      throw new Error("Still invalid after repair");
+    } catch {
+      setToast({ type: "error", message: "Could not parse AI response. Try asking again." });
+    }
+  }
+
   async function sendChatMessage() {
     if (!chatInput.trim() || chatLoading) return;
 
@@ -2178,9 +2695,12 @@ export default function App() {
       context.codeOutput = outputEl.textContent;
     }
 
-    // Teacher: include topics list
+    // Teacher: include full curriculum snapshot (topics + items)
     if (user.role === "teacher" && topics.length > 0) {
-      context.topics = topics.map((t) => t.title).join(", ");
+      context.classTopics = topics.map((t) => ({
+        title: t.title,
+        items: (t.items || []).map((i) => ({ title: i.title, type: i.type })),
+      }));
     }
 
     try {
@@ -2244,6 +2764,64 @@ export default function App() {
           }
         }
       }
+
+      // 1B: Student guardrail — check if response went off-topic
+      if (user?.role === "student" && assistantContent) {
+        const offTopicPatterns = [
+          /how about (we|you) (explore|try|learn)/i,
+          /let('s| us) (explore|try something|learn)/i,
+          /you could also (try|learn|explore)/i,
+          /why not (try|explore|learn)/i,
+        ];
+        if (offTopicPatterns.some((re) => re.test(assistantContent))) {
+          fetch(`${API_BASE}/chat/validate-student-response`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({
+              response: assistantContent,
+              lessonContext: practiceDraft?.heading || "",
+            }),
+          })
+            .then((r) => r.json())
+            .then(({ data }) => {
+              if (!data?.onTopic && data?.correctedResponse) {
+                setChatMessages((prev) => {
+                  const updated = [...prev];
+                  updated[updated.length - 1] = { role: "assistant", content: data.correctedResponse };
+                  return updated;
+                });
+              }
+            })
+            .catch(() => {});
+        }
+      }
+
+      // 1C: Teacher quality badge — rate content after stream completes
+      if (user?.role === "teacher" && assistantContent) {
+        const rateableFences = ["practice-json", "mcq-json", "learning-json", "sa-json", "lesson-plan-json"];
+        if (rateableFences.some((f) => assistantContent.includes("```" + f))) {
+          fetch(`${API_BASE}/chat/rate-content`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ contentBlock: assistantContent }),
+          })
+            .then((r) => r.json())
+            .then(({ data }) => {
+              if (data?.quality) {
+                setChatMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  if (last?.role === "assistant") {
+                    updated[updated.length - 1] = { ...last, qualityRating: data };
+                  }
+                  return updated;
+                });
+              }
+            })
+            .catch(() => {});
+        }
+      }
+
     } catch (err) {
       setChatError(err.message);
     } finally {
@@ -2254,6 +2832,17 @@ export default function App() {
   function clearChat() {
     setChatMessages([]);
     setChatError("");
+  }
+
+  function collapseChat() {
+    if (chatExpanded) {
+      setChatAnimDir("collapsing");
+      setTimeout(() => {
+        setChatExpanded(false);
+        setChatAnimDir("fadein");
+        setTimeout(() => setChatAnimDir(null), 200);
+      }, 180);
+    }
   }
 
   async function handleImportMcqSave() {
@@ -3141,6 +3730,110 @@ export default function App() {
     );
   }
 
+  async function handleImportLearningAllSave() {
+    if (!activeClassId || !importLearningAll?.length) return;
+    setImportLearningAllError("");
+    setImportLearningAllSaving(true);
+    try {
+      let topicId = importLearningAllTopicId;
+      if (topicId === "__new__") {
+        if (!importLearningAllNewTopic.trim()) {
+          setImportLearningAllError("New topic title is required.");
+          setImportLearningAllSaving(false);
+          return;
+        }
+        const topicRes = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ title: importLearningAllNewTopic.trim() }),
+        });
+        const topicData = await topicRes.json();
+        if (!topicRes.ok) { setImportLearningAllError(topicData?.error?.message || "Failed to create topic."); setImportLearningAllSaving(false); return; }
+        const created = topicData?.data?.topic;
+        topicId = created?.id || created?._id;
+        setTopics((prev) => [...prev, created]);
+      }
+      const savedItems = [];
+      for (const item of importLearningAll) {
+        const itemRes = await fetch(`${API_BASE}/classes/${activeClassId}/topics/${topicId}/items`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({
+            title: item.title.trim(),
+            type: "learning",
+            practiceBody: item.body || "",
+            practiceInstructions: item.instructions || "",
+            practiceHints: Array.isArray(item.hints) ? item.hints : [],
+            practiceCodeStarter: item.codeStarter || "",
+          }),
+        });
+        const itemData = await itemRes.json();
+        if (itemRes.ok && itemData?.data?.item) savedItems.push({ topicId, item: itemData.data.item });
+      }
+      setTopics((prev) =>
+        prev.map((t) => {
+          const newItems = savedItems.filter((s) => s.topicId === (t.id || t._id?.toString())).map((s) => s.item);
+          return newItems.length ? { ...t, items: [...(t.items || []), ...newItems] } : t;
+        })
+      );
+      setImportLearningAll(null);
+      setToast({ type: "success", message: `${savedItems.length} lessons imported!` });
+    } catch {
+      setImportLearningAllError("Server not reachable.");
+    } finally {
+      setImportLearningAllSaving(false);
+    }
+  }
+
+  function renderImportLearningAllModal() {
+    if (!importLearningAll?.length) return null;
+    return (
+      <div className="modal-overlay" onClick={() => setImportLearningAll(null)}>
+        <div className="modal-content mcq-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="mcq-modal-header">
+            <div>
+              <p className="mcq-modal-eyebrow">AI Generated</p>
+              <h3 className="mcq-modal-title">Import {importLearningAll.length} Lessons</h3>
+            </div>
+            <button type="button" className="mcq-modal-close" onClick={() => setImportLearningAll(null)}>✕</button>
+          </div>
+          <div className="mcq-modal-body">
+            {importLearningAllError && <p className="mcq-modal-error">{importLearningAllError}</p>}
+            <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: 10 }}>
+              The following {importLearningAll.length} lessons will be imported:
+            </p>
+            <ul style={{ fontSize: "0.85rem", paddingLeft: 18, marginBottom: 14, display: "flex", flexDirection: "column", gap: 4 }}>
+              {importLearningAll.map((item, i) => (
+                <li key={i} style={{ color: "var(--text-primary)" }}>{item.title}</li>
+              ))}
+            </ul>
+            <label>Save to Topic</label>
+            <select value={importLearningAllTopicId} onChange={(e) => setImportLearningAllTopicId(e.target.value)}>
+              {topics.map((t) => (
+                <option key={t.id} value={t.id}>{t.title}</option>
+              ))}
+              <option value="__new__">+ Create new topic...</option>
+            </select>
+            {importLearningAllTopicId === "__new__" && (
+              <input
+                placeholder="New topic title"
+                value={importLearningAllNewTopic}
+                onChange={(e) => setImportLearningAllNewTopic(e.target.value)}
+                style={{ marginTop: 6 }}
+              />
+            )}
+          </div>
+          <div className="mcq-modal-footer">
+            <button className="primary-button" disabled={importLearningAllSaving} onClick={handleImportLearningAllSave}>
+              {importLearningAllSaving ? "Importing..." : `Import All ${importLearningAll.length} Lessons`}
+            </button>
+            <button className="ghost-button" onClick={() => setImportLearningAll(null)}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   function renderChatBot() {
     if (!user) return null;
 
@@ -3248,12 +3941,42 @@ export default function App() {
               </div>
             </div>
             <div className="chat-messages">
-              {chatMessages.length === 0 && (
-                <p className="chat-empty">
-                  {user.role === "teacher"
-                    ? "Ask me to generate exercises, quiz questions, or help grade student submissions based on your lesson content."
-                    : "Ask me for hints, help debugging your code, or to explain Python concepts."}
-                </p>
+              {chatMessages.length === 0 && user.role === "teacher" && (
+                <div className="chat-empty-guide">
+                  <p className="chat-empty-guide-title">What can I help you with?</p>
+                  {[
+                    { label: "Generate Content", prompts: [
+                      "Generate a beginner MCQ about for loops with 4 options",
+                      "Create a practice exercise where students print numbers 1 to 10",
+                      "Create a learning lesson explaining Python lists for beginners",
+                    ]},
+                    { label: "Lesson Planning", prompts: [
+                      "Create a 3-topic lesson plan for introducing Python to middle schoolers",
+                      "Write a lesson plan covering functions and return values",
+                    ]},
+                    { label: "Grading Help", prompts: [
+                      "What feedback would you give a student who answered: [paste answer]?",
+                      "Does this code correctly solve: [paste problem]? Code: [paste code]",
+                    ]},
+                  ].map(({ label, prompts }) => (
+                    <div key={label} className="chat-guide-group">
+                      <div className="chat-guide-label">{label}</div>
+                      {prompts.map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          className="chat-guide-prompt"
+                          onClick={() => setChatInput(p)}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {chatMessages.length === 0 && user.role === "student" && (
+                <p className="chat-empty">Ask me for hints, help debugging your code, or to explain Python concepts.</p>
               )}
               {chatMessages.map((msg, i) => (
                 <div key={i} className={`chat-msg chat-msg-${msg.role}`}>
@@ -3276,20 +3999,20 @@ export default function App() {
                         {msg.role === "assistant" &&
                           user.role === "teacher" &&
                           activeClassId &&
-                          parseMcqFromMessage(msg.content) && (
+                          hasFence(msg.content, "mcq-json") && (
                             <button
                               type="button"
                               className="chat-copy-btn chat-import-btn"
                               title="Import as MCQ Quiz"
                               onClick={() => {
-                                const mcq = parseMcqFromMessage(msg.content);
-                                if (mcq) {
+                                collapseChat();
+                                repairAndImport(msg.content, "mcq-json", parseMcqFromMessage, (mcq) => {
                                   setImportMcq(mcq);
                                   setImportMcqTopicId(topics[0]?.id || "__new__");
                                   setImportMcqTitle(mcq.title || mcq.question.slice(0, 60));
                                   setImportMcqError("");
                                   setImportMcqNewTopic("");
-                                }
+                                });
                               }}
                             >
                               Import MCQ
@@ -3298,19 +4021,19 @@ export default function App() {
                         {msg.role === "assistant" &&
                           user.role === "teacher" &&
                           activeClassId &&
-                          parseSaFromMessage(msg.content) && (
+                          hasFence(msg.content, "sa-json") && (
                             <button
                               type="button"
                               className="chat-copy-btn chat-import-btn"
                               title="Import as Short Answer Quiz"
                               onClick={() => {
-                                const sa = parseSaFromMessage(msg.content);
-                                if (sa) {
+                                collapseChat();
+                                repairAndImport(msg.content, "sa-json", parseSaFromMessage, (sa) => {
                                   setImportSa(sa);
                                   setImportSaTopicId(topics[0]?.id || "__new__");
                                   setImportSaError("");
                                   setImportSaNewTopic("");
-                                }
+                                });
                               }}
                             >
                               Import Short Answer
@@ -3319,19 +4042,19 @@ export default function App() {
                         {msg.role === "assistant" &&
                           user.role === "teacher" &&
                           activeClassId &&
-                          parsePracticeFromMessage(msg.content) && (
+                          hasFence(msg.content, "practice-json") && (
                             <button
                               type="button"
                               className="chat-copy-btn chat-import-btn"
                               title="Import as Coding Exercise"
                               onClick={() => {
-                                const ex = parsePracticeFromMessage(msg.content);
-                                if (ex) {
+                                collapseChat();
+                                repairAndImport(msg.content, "practice-json", parsePracticeFromMessage, (ex) => {
                                   setImportPractice(ex);
                                   setImportPracticeTopicId(topics[0]?.id || "__new__");
                                   setImportPracticeError("");
                                   setImportPracticeNewTopic("");
-                                }
+                                });
                               }}
                             >
                               Import Exercise
@@ -3340,17 +4063,17 @@ export default function App() {
                         {msg.role === "assistant" &&
                           user.role === "teacher" &&
                           activeClassId &&
-                          parseLessonPlanFromMessage(msg.content) && (
+                          hasFence(msg.content, "lesson-plan-json") && (
                             <button
                               type="button"
                               className="chat-copy-btn chat-import-btn"
                               title="Import full lesson plan"
                               onClick={() => {
-                                const plan = parseLessonPlanFromMessage(msg.content);
-                                if (plan) {
+                                collapseChat();
+                                repairAndImport(msg.content, "lesson-plan-json", parseLessonPlanFromMessage, (plan) => {
                                   setImportPlan(plan);
                                   setImportPlanError("");
-                                }
+                                });
                               }}
                             >
                               Import Lesson Plan
@@ -3359,29 +4082,58 @@ export default function App() {
                         {msg.role === "assistant" &&
                           user.role === "teacher" &&
                           activeClassId &&
-                          parseLearningFromMessage(msg.content) && (
-                            <button
-                              type="button"
-                              className="chat-copy-btn chat-import-btn"
-                              title="Import as Learning Lesson"
-                              onClick={() => {
-                                const item = parseLearningFromMessage(msg.content);
-                                if (item) {
-                                  setImportLearning(item);
-                                  setImportLearningTopicId(topics[0]?.id || "__new__");
-                                  setImportLearningError("");
-                                  setImportLearningNewTopic("");
-                                }
-                              }}
-                            >
-                              Import Learning
-                            </button>
+                          hasFence(msg.content, "learning-json") && (() => {
+                            const count = countFences(msg.content, "learning-json");
+                            if (count > 1) {
+                              return (
+                                <button
+                                  type="button"
+                                  className="chat-copy-btn chat-import-btn"
+                                  title={`Import all ${count} lessons`}
+                                  onClick={() => {
+                                    collapseChat();
+                                    const items = parseAllLearningFromMessage(msg.content);
+                                    if (items.length) {
+                                      setImportLearningAll(items);
+                                      setImportLearningAllTopicId(topics[0]?.id || "__new__");
+                                      setImportLearningAllError("");
+                                      setImportLearningAllNewTopic("");
+                                    }
+                                  }}
+                                >
+                                  Import All ({count})
+                                </button>
+                              );
+                            }
+                            return (
+                              <button
+                                type="button"
+                                className="chat-copy-btn chat-import-btn"
+                                title="Import as Learning Lesson"
+                                onClick={() => {
+                                  collapseChat();
+                                  repairAndImport(msg.content, "learning-json", parseLearningFromMessage, (item) => {
+                                    setImportLearning(item);
+                                    setImportLearningTopicId(topics[0]?.id || "__new__");
+                                    setImportLearningError("");
+                                    setImportLearningNewTopic("");
+                                  });
+                                }}
+                              >
+                                Import Learning
+                              </button>
+                            );
+                          })()}
+                          {msg.role === "assistant" && msg.qualityRating && (
+                            <span className={`quality-badge quality-${msg.qualityRating.quality === "needs_review" ? "review" : msg.qualityRating.quality}`}>
+                              {msg.qualityRating.quality === "good" ? "✓ Good" : msg.qualityRating.quality === "fair" ? "~ Fair" : "⚠ Review"}
+                            </span>
                           )}
                       </div>
                     )}
                   </div>
                   <div className="chat-msg-content">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{stripMachineBlocks(msg.content)}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{stripMachineBlocks(msg.content)}</ReactMarkdown>
                   </div>
                 </div>
               ))}
@@ -3425,13 +4177,16 @@ export default function App() {
         {renderImportPracticeModal()}
         {renderImportPlanModal()}
         {renderImportLearningModal()}
+        {renderImportLearningAllModal()}
       </>
     );
   }
 
   function handleSaveJson() {
     if (route.page === "practice" && isTeacherView && practiceDraft._itemId) {
-      setLessonJson(JSON.stringify(lesson, null, 2));
+      const { body: nbBody, hints: nbHints } = serializeCellsToBody(nbCells);
+      const draftToSave = { ...practiceDraft, body: nbBody, hints: nbHints };
+      setLessonJson(JSON.stringify(draftToSave, null, 2));
       async function persistPractice() {
         try {
           const res = await fetch(
@@ -3442,10 +4197,10 @@ export default function App() {
               body: JSON.stringify({
                 title: practiceDraft.heading,
                 type: "practice",
-                practiceBody: practiceDraft.body,
+                practiceBody: nbBody,
                 practiceInstructions: practiceDraft.instructions,
                 practiceQuestion: practiceDraft.question,
-                practiceHints: practiceDraft.hints,
+                practiceHints: nbHints,
                 practiceCodeStarter: practiceDraft.codeStarter,
                 practiceModelAnswer: practiceDraft.modelAnswer,
                 practiceTestMode: practiceDraft.testMode,
@@ -3717,18 +4472,72 @@ export default function App() {
             </div>
             {classError && <p className="auth-error">{classError}</p>}
             {classNotice && <p className="auth-notice">{classNotice}</p>}
+            {!isTeacher && Object.keys(allClassProgress).length > 0 && (() => {
+              const totAttempted = Object.values(allClassProgress).reduce((s, p) => s + (p?.attemptedItems || 0), 0);
+              const totGraded = Object.values(allClassProgress).reduce((s, p) => s + (p?.gradedItems || 0), 0);
+              return (
+                <div className="dashboard-summary panel-animate">
+                  <span className="dashboard-summary-label">Overall progress</span>
+                  <strong>{totAttempted}/{totGraded} items attempted across {classes.length} class{classes.length !== 1 ? "es" : ""}</strong>
+                </div>
+              );
+            })()}
             <div className="class-grid">
-              {classes.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className="class-pill panel-animate"
-                  onClick={() => handleSelectClass(item.id)}
-                >
-                  <span>{item.name}</span>
-                  <small>{isTeacher ? `Join code: ${item.joinCode}` : "Joined"}</small>
-                </button>
-              ))}
+              {classes.map((item) => {
+                const prog = allClassProgress[item.id];
+                const pct = prog && prog.gradedItems > 0
+                  ? Math.round((prog.attemptedItems / prog.gradedItems) * 100)
+                  : null;
+                const nextItem = prog?.items?.find((i) => i.attempted === false);
+                return isTeacher ? (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="class-pill panel-animate"
+                    onClick={() => handleSelectClass(item.id)}
+                  >
+                    <span>{item.name}</span>
+                    <small>Join code: {item.joinCode}</small>
+                  </button>
+                ) : (
+                  <div key={item.id} className="class-card panel-animate">
+                    <div
+                      className="class-card-body"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => handleSelectClass(item.id)}
+                      onKeyDown={(e) => e.key === "Enter" && handleSelectClass(item.id)}
+                    >
+                      <span className="class-card-name">{item.name}</span>
+                      {prog && prog.gradedItems > 0 ? (
+                        <>
+                          <div className="class-progress-bar">
+                            <div className="class-progress-fill" style={{ width: `${pct}%` }} />
+                          </div>
+                          <small className="class-progress-label">
+                            {prog.attemptedItems}/{prog.gradedItems} items attempted · {pct}%
+                          </small>
+                        </>
+                      ) : (
+                        <small>Tap to open</small>
+                      )}
+                    </div>
+                    {nextItem && (
+                      <button
+                        className="accent-button class-continue-btn"
+                        type="button"
+                        onClick={() => {
+                          if (nextItem.type === "practice") navigateToPractice(item.id, nextItem.id);
+                          else if (nextItem.type === "quiz") navigateToQuiz(item.id, nextItem.id);
+                          else navigateToLearningItem(item.id, nextItem.id);
+                        }}
+                      >
+                        Continue →
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
               {!classes.length && (
                 <p className="empty-state">
                   {isTeacher
@@ -3789,7 +4598,209 @@ export default function App() {
           </div>
         </header>
 
+        {isTeacher && (
+          <div className="class-tab-bar">
+            <button
+              className={`class-tab${classTab === "topics" ? " class-tab-active" : ""}`}
+              type="button"
+              onClick={() => setClassTab("topics")}
+            >
+              Topics &amp; Students
+            </button>
+            <button
+              className={`class-tab${classTab === "stats" ? " class-tab-active" : ""}`}
+              type="button"
+              onClick={() => setClassTab("stats")}
+            >
+              Class Stats
+            </button>
+          </div>
+        )}
+
+        {isTeacher && classTab === "stats" ? (
+          <section className="class-stats-section panel-animate">
+            {classStatsLoading && <p className="empty-state">Loading stats…</p>}
+            {!classStatsLoading && classStats && (
+              <>
+                {/* ── Summary cards ── */}
+                <div className="stats-cards">
+                  {[
+                    { n: classStats.studentCount, label: "Students enrolled" },
+                    { n: classStats.topicCount, label: "Topics" },
+                    { n: classStats.itemCounts.learning, label: "Learning items" },
+                    { n: classStats.itemCounts.quiz, label: "Quizzes" },
+                    { n: classStats.itemCounts.practice, label: "Practice items" },
+                  ].map(({ n, label }) => (
+                    <div key={label} className="stat-card">
+                      <span className="stat-number">{n}</span>
+                      <span className="stat-label">{label}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* ── Overall submission bar ── */}
+                <div className="stats-quiz-section">
+                  <h3>Overall Submissions</h3>
+                  {classStats.quizSummary.total === 0 ? (
+                    <p className="empty-state">No submissions yet.</p>
+                  ) : (
+                    <>
+                      <p className="stats-meta">{classStats.quizSummary.total} total submissions</p>
+                      <div className="stats-bar-wrap">
+                        <div className="stats-bar-segment stats-bar-correct" style={{ width: `${Math.round((classStats.quizSummary.correct / classStats.quizSummary.total) * 100)}%` }} title={`Correct: ${classStats.quizSummary.correct}`} />
+                        <div className="stats-bar-segment stats-bar-incorrect" style={{ width: `${Math.round((classStats.quizSummary.incorrect / classStats.quizSummary.total) * 100)}%` }} title={`Incorrect: ${classStats.quizSummary.incorrect}`} />
+                        <div className="stats-bar-segment stats-bar-pending" style={{ width: `${Math.round((classStats.quizSummary.pending / classStats.quizSummary.total) * 100)}%` }} title={`Pending: ${classStats.quizSummary.pending}`} />
+                      </div>
+                      <div className="stats-legend">
+                        <span className="legend-dot legend-correct" /> Correct ({classStats.quizSummary.correct})
+                        <span className="legend-dot legend-incorrect" /> Incorrect ({classStats.quizSummary.incorrect})
+                        <span className="legend-dot legend-pending" /> Pending ({classStats.quizSummary.pending})
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* ── Student performance table ── */}
+                {classStats.studentBreakdowns?.length > 0 && (
+                  <div className="stats-table-section">
+                    <h3>Student Performance</h3>
+                    <p className="stats-meta">{classStats.studentBreakdowns.length} student{classStats.studentBreakdowns.length !== 1 ? "s" : ""} · sorted by activity</p>
+                    <div className="stats-table-wrap">
+                      <table className="stats-table">
+                        <thead>
+                          <tr>
+                            <th>Student</th>
+                            <th>Attempted</th>
+                            <th>Correct</th>
+                            <th>Success Rate</th>
+                            <th>Progress</th>
+                            <th>Last Active</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {classStats.studentBreakdowns.map((s) => {
+                            const pct = s.total > 0 ? Math.round((s.attempted / s.total) * 100) : 0;
+                            return (
+                              <tr key={s.id}>
+                                <td
+                                  className="stats-student-name stats-student-link"
+                                  onClick={() => navigateToStudentStats(activeClassId, s.id)}
+                                  title="View student detail"
+                                >
+                                  {s.name}
+                                </td>
+                                <td>{s.attempted}/{s.total}</td>
+                                <td>{s.correct}</td>
+                                <td>
+                                  {s.successRate !== null
+                                    ? <span className={`stats-rate-pill ${s.successRate >= 70 ? "rate-good" : s.successRate >= 40 ? "rate-mid" : "rate-low"}`}>{s.successRate}%</span>
+                                    : <span className="stats-meta">—</span>}
+                                </td>
+                                <td>
+                                  <div className="stats-mini-bar">
+                                    <div className="stats-mini-fill" style={{ width: `${pct}%` }} />
+                                  </div>
+                                </td>
+                                <td className="stats-meta">
+                                  {s.lastActivity ? new Date(s.lastActivity).toLocaleDateString() : "—"}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Item performance table ── */}
+                {classStats.itemBreakdowns?.length > 0 && (
+                  <div className="stats-table-section">
+                    <h3>Item Performance</h3>
+                    <p className="stats-meta">Sorted by topic order · difficulty based on correct rate</p>
+                    <div className="stats-table-wrap">
+                      <table className="stats-table">
+                        <thead>
+                          <tr>
+                            <th>Item</th>
+                            <th>Topic</th>
+                            <th>Type</th>
+                            <th>Attempted</th>
+                            <th>Correct Rate</th>
+                            <th>Difficulty</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {classStats.itemBreakdowns.map((item) => {
+                            const difficulty = item.correctRate === null ? null
+                              : item.correctRate >= 70 ? { label: "Easy", cls: "diff-easy" }
+                              : item.correctRate >= 40 ? { label: "Medium", cls: "diff-mid" }
+                              : { label: "Hard", cls: "diff-hard" };
+                            return (
+                              <tr key={item.id}>
+                                <td className="stats-student-name">{item.title}</td>
+                                <td className="stats-meta">{item.topicTitle}</td>
+                                <td><span className={`topic-type type-${item.type}`}>{item.type}</span></td>
+                                <td>{item.attempted}/{item.studentCount}</td>
+                                <td>
+                                  {item.correctRate !== null
+                                    ? <span className={`stats-rate-pill ${item.correctRate >= 70 ? "rate-good" : item.correctRate >= 40 ? "rate-mid" : "rate-low"}`}>{item.correctRate}%</span>
+                                    : <span className="stats-meta">—</span>}
+                                </td>
+                                <td>
+                                  {difficulty
+                                    ? <span className={`diff-badge ${difficulty.cls}`}>{difficulty.label}</span>
+                                    : <span className="stats-meta">—</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+              </>
+            )}
+          </section>
+        ) : (
         <section className="class-detail-grid">
+          {!isTeacher && myClassProgress && myClassProgress.gradedItems > 0 && (
+            <div className="class-progress-summary panel-animate">
+              <div className="class-progress-summary-header">
+                <span className="class-progress-summary-title">Your Progress</span>
+                <span className="class-progress-fraction">
+                  {myClassProgress.attemptedItems}/{myClassProgress.gradedItems} items attempted
+                  {myClassProgress.correctItems > 0 && ` · ${myClassProgress.correctItems} correct`}
+                </span>
+              </div>
+              <div className="class-progress-bar class-progress-bar--lg">
+                <div
+                  className="class-progress-fill"
+                  style={{ width: `${Math.round((myClassProgress.attemptedItems / myClassProgress.gradedItems) * 100)}%` }}
+                />
+              </div>
+              {(() => {
+                const nextItem = myClassProgress.items?.find((i) => i.attempted === false);
+                return nextItem ? (
+                  <button
+                    className="accent-button"
+                    type="button"
+                    onClick={() => {
+                      if (nextItem.type === "practice") navigateToPractice(activeClassId, nextItem.id);
+                      else if (nextItem.type === "quiz") navigateToQuiz(activeClassId, nextItem.id);
+                      else navigateToLearningItem(activeClassId, nextItem.id);
+                    }}
+                  >
+                    Continue → {nextItem.title}
+                  </button>
+                ) : (
+                  <p className="class-progress-done">All items completed! 🎉</p>
+                );
+              })()}
+            </div>
+          )}
           <div
             className="class-detail-panel panel-animate"
             onKeyDown={(event) => {
@@ -4477,6 +5488,7 @@ export default function App() {
             </div>
           )}
         </section>
+        )}
       </main>
       {renderChatBot()}
       </PageShell>
@@ -4511,6 +5523,29 @@ export default function App() {
               </button>
             </div>
           </header>
+          {navIndex >= 0 && (
+            <nav className="item-pagination-bar">
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={!navPrev}
+                onClick={() => navigateToItem(activeClassId, navPrev)}
+              >
+                ← Prev
+              </button>
+              <span className="item-pagination-pos">
+                {navIndex + 1} / {itemNavList.length}
+              </span>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={!navNext}
+                onClick={() => navigateToItem(activeClassId, navNext)}
+              >
+                Next →
+              </button>
+            </nav>
+          )}
           {learningError && <p className="practice-error">{learningError}</p>}
           {learningMeta && (
             <LearningViewer
@@ -4558,6 +5593,29 @@ export default function App() {
               </button>
             </div>
           </header>
+          {navIndex >= 0 && (
+            <nav className="item-pagination-bar">
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={!navPrev}
+                onClick={() => navigateToItem(activeClassId, navPrev)}
+              >
+                ← Prev
+              </button>
+              <span className="item-pagination-pos">
+                {navIndex + 1} / {itemNavList.length}
+              </span>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={!navNext}
+                onClick={() => navigateToItem(activeClassId, navNext)}
+              >
+                Next →
+              </button>
+            </nav>
+          )}
 
           <section className="class-detail-panel panel-animate">
             {quizLoading && <p className="empty-state">Loading quiz…</p>}
@@ -4568,7 +5626,7 @@ export default function App() {
                   {quizMeta.topic?.title || "Topic"} · {isMcq ? "MCQ" : "Short answer"}
                 </p>
                 <div className="quiz-question-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
                     {quizMeta.quizQuestion || "No question set yet."}
                   </ReactMarkdown>
                 </div>
@@ -4741,7 +5799,7 @@ export default function App() {
                     <div>
                       <p className="progress-title">{item.itemTitle}</p>
                       <p className="progress-meta">
-                        {item.topicTitle || "Topic"} · {item.quizSubtype === "mcq" ? "MCQ" : "Short answer"}
+                        {item.topicTitle || "Topic"} · {item.itemType === "practice" ? "Code submission" : item.quizSubtype === "mcq" ? "MCQ" : "Short answer"}
                       </p>
                     </div>
                     <div className={`progress-status status-${item.gradingStatus}`}>
@@ -4794,7 +5852,7 @@ export default function App() {
                 Close
               </button>
             </div>
-            {selectedQuizAttempt.quizQuestion && (
+            {selectedQuizAttempt.itemType !== "practice" && selectedQuizAttempt.quizQuestion && (
               <p className="progress-meta">{selectedQuizAttempt.quizQuestion}</p>
             )}
             <pre className="code-block">
@@ -4833,6 +5891,147 @@ export default function App() {
             </div>
           </section>
         )}
+        </main>
+        {renderChatBot()}
+      </PageShell>
+    );
+  }
+
+  if (route.page === "student-stats") {
+    const sd = studentStatsData;
+    return (
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className="teacher-dashboard">
+          <header className="teacher-topbar">
+            <div>
+              <p className="teacher-eyebrow">Teacher Workspace</p>
+              <h1>{sd?.student?.name || "Student"}</h1>
+              {activeClass && <p className="class-subtitle">Class: {activeClass.name}</p>}
+            </div>
+            <div className="teacher-actions">
+              <button className="ghost-button" type="button" onClick={() => { navigateToClass(activeClassId); setTimeout(() => setClassTab("stats"), 50); }}>
+                ← Back to Stats
+              </button>
+              <button className="ghost-button" type="button" onClick={() => navigateToClass(activeClassId)}>
+                Back to Class
+              </button>
+              <span className="user-pill">{user.name}</span>
+              <span className="role-pill">{user.role}</span>
+              <button className="ghost-button" type="button" onClick={handleLogout}>Log out</button>
+            </div>
+          </header>
+
+          {studentStatsLoading && <p className="empty-state">Loading…</p>}
+
+          {!studentStatsLoading && sd && (
+            <section className="class-stats-section panel-animate">
+
+              {/* Summary cards */}
+              <div className="stats-cards">
+                {[
+                  { n: sd.summary.attempted, label: "Items attempted" },
+                  { n: sd.summary.correct, label: "Correct" },
+                  { n: sd.summary.total - sd.summary.attempted, label: "Not attempted" },
+                  { n: sd.summary.total > 0 ? `${Math.round((sd.summary.correct / sd.summary.total) * 100)}%` : "—", label: "Overall score" },
+                ].map(({ n, label }) => (
+                  <div key={label} className="stat-card">
+                    <span className="stat-number">{n}</span>
+                    <span className="stat-label">{label}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Item-by-item table */}
+              <div className="stats-table-section">
+                <h3>Item Breakdown</h3>
+                <p className="stats-meta">{sd.summary.total} gradable items across all topics</p>
+                <div className="stats-table-wrap">
+                  <table className="stats-table">
+                    <thead>
+                      <tr>
+                        <th>Item</th>
+                        <th>Topic</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Attempts</th>
+                        <th>Response</th>
+                        <th>Feedback</th>
+                        <th>Submitted</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sd.items.map((item) => (
+                        <tr key={item.id}>
+                          <td className="stats-student-name">{item.title}</td>
+                          <td className="stats-meta">{item.topicTitle}</td>
+                          <td><span className={`topic-type type-${item.type}`}>{item.type}</span></td>
+                          <td>
+                            <span className={`sd-status-pill sd-${item.status}`}>
+                              {item.status === "correct" ? "✓ Correct"
+                                : item.status === "incorrect" ? "✗ Incorrect"
+                                : item.status === "pending" ? "… Pending"
+                                : "— Not attempted"}
+                            </span>
+                          </td>
+                          <td>{item.attempts || "—"}</td>
+                          <td className="sd-response-cell">
+                            {item.responseText
+                              ? <span className="sd-response-text" title={item.responseText}>{item.responseText.slice(0, 60)}{item.responseText.length > 60 ? "…" : ""}</span>
+                              : <span className="stats-meta">—</span>}
+                          </td>
+                          <td className="stats-meta">{item.feedback || "—"}</td>
+                          <td className="stats-meta">
+                            {item.submittedAt ? new Date(item.submittedAt).toLocaleDateString() : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Vertical gradebook */}
+              {sd.items.length > 0 && (
+                <div className="stats-table-section">
+                  <h3>Gradebook</h3>
+                  <p className="stats-meta">
+                    <span className="gb-legend-cell gb-correct" /> Correct &nbsp;
+                    <span className="gb-legend-cell gb-incorrect" /> Incorrect &nbsp;
+                    <span className="gb-legend-cell gb-pending" /> Pending &nbsp;
+                    <span className="gb-legend-cell gb-none" /> Not attempted
+                  </p>
+                  <div className="stats-table-wrap">
+                    <table className="stats-table">
+                      <thead>
+                        <tr>
+                          <th>Item</th>
+                          <th>Topic</th>
+                          <th>Type</th>
+                          <th style={{ width: 120 }}>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sd.items.map((item) => (
+                          <tr key={item.id}>
+                            <td className="stats-student-name">{item.title}</td>
+                            <td className="stats-meta">{item.topicTitle}</td>
+                            <td><span className={`topic-type type-${item.type}`}>{item.type}</span></td>
+                            <td className={`gb-cell gb-${item.status}`}>
+                              {item.status === "correct" ? "✓ Correct"
+                                : item.status === "incorrect" ? "✗ Incorrect"
+                                : item.status === "pending" ? "… Pending"
+                                : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+            </section>
+          )}
         </main>
         {renderChatBot()}
       </PageShell>
@@ -4889,6 +6088,29 @@ export default function App() {
           </button>
         </div>
       </header>
+      {navIndex >= 0 && (
+        <nav className="item-pagination-bar item-pagination-bar--workspace">
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={!navPrev}
+            onClick={() => navigateToItem(activeClassId, navPrev)}
+          >
+            ← Prev
+          </button>
+          <span className="item-pagination-pos">
+            {navIndex + 1} / {itemNavList.length}
+          </span>
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={!navNext}
+            onClick={() => navigateToItem(activeClassId, navNext)}
+          >
+            Next →
+          </button>
+        </nav>
+      )}
 
       <section className="workspace-grid">
         <aside className="panel lesson-panel panel-animate">
@@ -4947,13 +6169,45 @@ export default function App() {
                   onChange={(event) => setLessonJson(event.target.value)}
                 />
               </div>
-              <label className="lesson-field">
-                Lesson text
-                <textarea
-                  value={lesson.body}
-                  onChange={(event) => updateActiveLesson({ body: event.target.value })}
-                />
-              </label>
+              {route.page === "practice" ? (
+                <>
+                  <label className="lesson-field">Lesson Content</label>
+                  <NotebookEditor
+                    cells={nbCells}
+                    onChange={(next) => {
+                      setNbCells(next);
+                      const { body: nb, hints: nh } = serializeCellsToBody(next);
+                      updateActiveLesson({ body: nb, hints: nh });
+                    }}
+                    withHints
+                  />
+                </>
+              ) : (
+                <>
+                  <label className="lesson-field">
+                    Lesson text
+                    <textarea
+                      value={lesson.body}
+                      onChange={(event) => updateActiveLesson({ body: event.target.value })}
+                    />
+                  </label>
+                  <label className="lesson-field">
+                    Hints (one per line)
+                    <textarea
+                      value={lesson.hints.join("\n")}
+                      onChange={(event) =>
+                        updateActiveLesson((prev) => ({
+                          ...prev,
+                          hints: event.target.value
+                            .split("\n")
+                            .map((hint) => hint.trim())
+                            .filter(Boolean),
+                        }))
+                      }
+                    />
+                  </label>
+                </>
+              )}
               {route.page !== "practice" && (
                 <label className="lesson-field">
                   Question
@@ -4968,21 +6222,6 @@ export default function App() {
                 <textarea
                   value={lesson.instructions}
                   onChange={(event) => updateActiveLesson({ instructions: event.target.value })}
-                />
-              </label>
-              <label className="lesson-field">
-                Hints (one per line)
-                <textarea
-                  value={lesson.hints.join("\n")}
-                  onChange={(event) =>
-                    updateActiveLesson((prev) => ({
-                      ...prev,
-                      hints: event.target.value
-                        .split("\n")
-                        .map((hint) => hint.trim())
-                        .filter(Boolean),
-                    }))
-                  }
                 />
               </label>
               <label className="lesson-field">
@@ -5088,7 +6327,7 @@ export default function App() {
           ) : (
             <>
               <div className="lesson-body">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{lesson.body || ""}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{lesson.body || ""}</ReactMarkdown>
               </div>
               <div className="lesson-callout">
                 <p>Hints</p>
@@ -5133,9 +6372,16 @@ export default function App() {
                 {testRunning ? "Running…" : "Run Tests"}
               </button>
             )}
-            <button className="ghost-button" type="button" onClick={submitLesson}>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={submitLesson}
+            >
               Submit
             </button>
+            {practiceSubmitted && (
+              <span className="submit-confirm">✓ Submitted</span>
+            )}
             <span className="footer-hint">Ctrl/Cmd + Enter</span>
           </div>
         </article>

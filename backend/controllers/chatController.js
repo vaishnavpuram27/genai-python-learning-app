@@ -1,4 +1,10 @@
-import { getChatCompletionStream, explainError } from "../services/chatService.js";
+import {
+  getChatCompletionStream,
+  explainError,
+  repairJsonContent,
+  validateStudentResponse,
+  rateContent,
+} from "../services/chatService.js";
 import { getMembership } from "../services/classService.js";
 import { getLessonById } from "../services/lessonService.js";
 import { sendError, sendSuccess } from "../utils/responses.js";
@@ -74,6 +80,7 @@ export async function streamChat(req, res) {
   if (clientCtx.codeOutput) serverCtx.codeOutput = clientCtx.codeOutput;
   if (clientCtx.studentAnswer) serverCtx.studentAnswer = clientCtx.studentAnswer;
   if (clientCtx.topics) serverCtx.topics = clientCtx.topics;
+  if (Array.isArray(clientCtx.classTopics)) serverCtx.classTopics = clientCtx.classTopics;
 
   /* ── Stream response via SSE ── */
   try {
@@ -107,5 +114,47 @@ export async function streamChat(req, res) {
         "CHAT_ERROR",
       );
     }
+  }
+}
+
+// 1A — Repair broken JSON fence block
+export async function repairJsonHandler(req, res) {
+  const { brokenContent, contentType } = req.body || {};
+  if (!brokenContent || !contentType) {
+    return sendError(res, "brokenContent and contentType are required", 400, "VALIDATION_ERROR");
+  }
+  try {
+    const fixed = await repairJsonContent(brokenContent, contentType);
+    return sendSuccess(res, { fixed });
+  } catch {
+    return sendError(res, "Could not repair JSON", 500, "REPAIR_ERROR");
+  }
+}
+
+// 1B — Validate student response stays on topic
+export async function validateStudentResponseHandler(req, res) {
+  const { response, lessonContext } = req.body || {};
+  if (!response) {
+    return sendError(res, "response is required", 400, "VALIDATION_ERROR");
+  }
+  try {
+    const result = await validateStudentResponse(response, lessonContext || "");
+    return sendSuccess(res, result);
+  } catch {
+    return sendError(res, "Validation failed", 500, "VALIDATION_ERROR");
+  }
+}
+
+// 1C — Rate AI-generated content quality
+export async function rateContentHandler(req, res) {
+  const { contentBlock } = req.body || {};
+  if (!contentBlock) {
+    return sendError(res, "contentBlock is required", 400, "VALIDATION_ERROR");
+  }
+  try {
+    const result = await rateContent(contentBlock);
+    return sendSuccess(res, result);
+  } catch {
+    return sendError(res, "Rating failed", 500, "RATING_ERROR");
   }
 }
