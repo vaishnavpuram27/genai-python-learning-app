@@ -8,6 +8,7 @@ import {
   getClass,
   getClassStats,
   getMyClassProgress,
+  getMyDashboard,
   getStudentProgress,
   getStudentStats,
   joinClass,
@@ -27,6 +28,7 @@ import {
   getQuizItem,
   submitQuizAttempt,
   gradeQuizAttempt,
+  getStudentAIInteractions,
 } from "../../controllers/classController.js";
 
 const router = Router();
@@ -48,8 +50,15 @@ router.get(
   validateObjectId("studentId"),
   getStudentStats
 );
+router.get(
+  "/:id/students/:studentId/ai-interactions",
+  validateObjectId("id"),
+  validateObjectId("studentId"),
+  getStudentAIInteractions
+);
 router.get("/:id/stats", validateObjectId("id"), getClassStats);
 router.get("/:id/my-progress", validateObjectId("id"), getMyClassProgress);
+router.get("/:id/my-dashboard", validateObjectId("id"), getMyDashboard);
 router.get("/:id/topics", validateObjectId("id"), listTopics);
 router.post("/:id/topics", validateObjectId("id"), createTopicHandler);
 // Reorder route must be BEFORE /:topicId so "reorder" isn't matched as a topicId

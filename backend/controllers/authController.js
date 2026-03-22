@@ -17,6 +17,9 @@ export async function signup(req, res) {
   if (!name || !password || !role) {
     return sendError(res, "Missing required fields", 400, "VALIDATION_ERROR");
   }
+  if (!["teacher", "student"].includes(role)) {
+    return sendError(res, "Role must be teacher or student", 400, "VALIDATION_ERROR");
+  }
   const existing = await User.findOne({ name }).lean();
   if (existing) {
     return sendError(res, "User already exists", 409, "USER_EXISTS");

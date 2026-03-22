@@ -7,6 +7,7 @@ import {
 } from "../services/chatService.js";
 import { getMembership } from "../services/classService.js";
 import { getLessonById } from "../services/lessonService.js";
+import { logInteraction, updateInteractionResponse } from "../services/aiInteractionService.js";
 import { sendError, sendSuccess } from "../utils/responses.js";
 
 export async function explainErrorHandler(req, res) {
@@ -82,6 +83,20 @@ export async function streamChat(req, res) {
   if (clientCtx.topics) serverCtx.topics = clientCtx.topics;
   if (Array.isArray(clientCtx.classTopics)) serverCtx.classTopics = clientCtx.classTopics;
 
+  /* ── Log AI interaction for students ── */
+  let interactionId = null;
+  if (req.user.role === "student" && clientCtx.classId) {
+    const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+    const interaction = await logInteraction({
+      userId: req.user.id,
+      classId: clientCtx.classId,
+      itemId: clientCtx.itemId || null,
+      role: "student",
+      userMessage: lastUserMsg?.content || "",
+    }).catch(() => null);
+    if (interaction) interactionId = interaction._id;
+  }
+
   /* ── Stream response via SSE ── */
   try {
     res.setHeader("Content-Type", "text/event-stream");
@@ -91,15 +106,21 @@ export async function streamChat(req, res) {
     res.flushHeaders();
 
     const stream = await getChatCompletionStream(role, serverCtx, messages);
+    let aiResponse = "";
 
     for await (const content of stream) {
       if (content) {
+        aiResponse += content;
         res.write(`data: ${JSON.stringify({ content })}\n\n`);
       }
     }
 
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
     res.end();
+
+    if (interactionId && aiResponse) {
+      updateInteractionResponse(interactionId, aiResponse).catch(() => {});
+    }
   } catch (err) {
     if (res.headersSent) {
       res.write(

@@ -44,3 +44,16 @@ export async function getTopicItemById(id) {
 export async function getTopicItemWithTopic(id) {
   return TopicItem.findById(id).populate("topicId").lean();
 }
+
+export async function listUpcomingDeadlines(classId, after) {
+  return TopicItem.find({ classId, isPublished: true, deadline: { $gt: after } })
+    .sort({ deadline: 1 })
+    .lean();
+}
+
+export async function listRecentItems(classId, since) {
+  return TopicItem.find({ classId, isPublished: true, createdAt: { $gte: since } })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .lean();
+}

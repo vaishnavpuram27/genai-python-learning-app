@@ -40,11 +40,15 @@ import {
   getTopicItemWithTopic,
   listTopicItemsByClass,
   listTopicItemsByTopic,
+  listUpcomingDeadlines,
+  listRecentItems,
   reorderTopicItems,
   updateTopicItem,
 } from "../services/topicItemService.js";
 import { sendError, sendSuccess } from "../utils/responses.js";
 import { gradeShortAnswer } from "../services/chatService.js";
+import { groupedCountsByClass, listByStudentInClass } from "../services/aiInteractionService.js";
+import { upsertView, groupedViewCountsByClass } from "../services/topicItemViewService.js";
 
 const TOPIC_ITEM_TYPES = ["learning", "quiz", "practice"];
 const QUIZ_SUBTYPES = ["mcq", "short_answer"];
@@ -186,6 +190,9 @@ function normalizeTopicItem(item) {
     topicId: item.topicId.toString(),
     type: item.type,
     title: item.title,
+    maxPoints: item.maxPoints ?? 0,
+    deadline: item.deadline || null,
+    isPublished: item.isPublished !== false,
     order: item.order ?? 0,
     quizSubtype: item.quizSubtype || null,
     quizQuestion: item.quizQuestion || "",
@@ -264,7 +271,11 @@ export async function listTopics(req, res) {
     return sendError(res, "Forbidden", 403, "FORBIDDEN");
   }
   const topics = await listTopicsByClass(classroom._id);
-  const items = await listTopicItemsByClass(classroom._id);
+  const allItems = await listTopicItemsByClass(classroom._id);
+  // Students only see published items
+  const items = req.user.role === "student"
+    ? allItems.filter((i) => i.isPublished !== false)
+    : allItems;
   const itemsByTopic = items.reduce((acc, item) => {
     const key = item.topicId.toString();
     if (!acc[key]) acc[key] = [];
@@ -423,6 +434,9 @@ export async function createTopicItemHandler(req, res) {
     topicId: req.params.topicId,
     type: payload.type,
     title: payload.title,
+    maxPoints: typeof payload.maxPoints === "number" && payload.maxPoints >= 0 ? Math.floor(payload.maxPoints) : 0,
+    deadline: payload.deadline ? new Date(payload.deadline) : null,
+    isPublished: typeof payload.isPublished === "boolean" ? payload.isPublished : true,
     order,
     ...quizFields,
     ...practiceFields,
@@ -470,6 +484,9 @@ export async function updateTopicItemHandler(req, res) {
   const update = {
     title: payload.title || item.title,
     type: payload.type || item.type,
+    maxPoints: typeof payload.maxPoints === "number" && payload.maxPoints >= 0 ? Math.floor(payload.maxPoints) : item.maxPoints ?? 0,
+    ...(payload.deadline !== undefined && { deadline: payload.deadline ? new Date(payload.deadline) : null }),
+    ...(typeof payload.isPublished === "boolean" && { isPublished: payload.isPublished }),
   };
   if (!TOPIC_ITEM_TYPES.includes(update.type)) {
     return sendError(res, "Invalid type", 400, "VALIDATION_ERROR");
@@ -531,6 +548,9 @@ export async function getPracticeItem(req, res) {
   if (!item || item.classId.toString() !== classroom._id.toString()) {
     return sendError(res, "Item not found", 404, "NOT_FOUND");
   }
+  if (req.user.role === "student" && item.isPublished === false) {
+    return sendError(res, "Item not found", 404, "NOT_FOUND");
+  }
   if (item.type !== "practice") {
     return sendError(res, "Not a practice item", 400, "INVALID_TYPE");
   }
@@ -570,8 +590,15 @@ export async function getLearningItem(req, res) {
   if (!item || item.classId.toString() !== classroom._id.toString()) {
     return sendError(res, "Item not found", 404, "NOT_FOUND");
   }
+  if (req.user.role === "student" && item.isPublished === false) {
+    return sendError(res, "Item not found", 404, "NOT_FOUND");
+  }
   if (item.type !== "learning") {
     return sendError(res, "Not a learning item", 400, "INVALID_TYPE");
+  }
+  // Track that this student has viewed this learning item
+  if (req.user.role === "student") {
+    await upsertView({ userId: req.user.id, classId: classroom._id, itemId: item._id }).catch(() => {});
   }
   return sendSuccess(res, {
     item: {
@@ -601,6 +628,9 @@ export async function getQuizItem(req, res) {
   }
   const item = await getTopicItemWithTopic(req.params.itemId);
   if (!item || item.classId.toString() !== classroom._id.toString()) {
+    return sendError(res, "Item not found", 404, "NOT_FOUND");
+  }
+  if (req.user.role === "student" && item.isPublished === false) {
     return sendError(res, "Item not found", 404, "NOT_FOUND");
   }
   if (item.type !== "quiz") {
@@ -692,7 +722,7 @@ export async function submitQuizAttempt(req, res) {
     if (expected) {
       const normalize = (value) => `${value}`.trim().toLowerCase();
       isCorrect = normalize(responseText) === normalize(expected);
-      score = isCorrect ? 1 : 0;
+      score = isCorrect ? (item.maxPoints || 1) : 0;
       status = "graded";
       gradingStatus = "auto_graded";
       gradedAt = new Date();
@@ -707,7 +737,7 @@ export async function submitQuizAttempt(req, res) {
           studentResponse: responseText,
         });
         isCorrect = grading.isCorrect;
-        score = grading.score;
+        score = isCorrect ? (item.maxPoints || 1) : 0;
         feedback = grading.feedback;
         status = "graded";
         gradingStatus = "auto_graded";
@@ -771,17 +801,23 @@ export async function gradeQuizAttempt(req, res) {
     return sendError(res, "Quiz attempt does not belong to this student", 400, "VALIDATION_ERROR");
   }
 
+  const gradingItem = await getTopicItemById(attempt.itemId);
+  const itemMaxPoints = gradingItem?.maxPoints ?? 0;
+
   const payload = req.body || {};
   if (typeof payload.isCorrect !== "boolean") {
     return sendError(res, "isCorrect must be true or false", 400, "VALIDATION_ERROR");
   }
   const feedback = `${payload.feedback ?? ""}`.trim();
-  const score =
+  let score =
     typeof payload.score === "number" && Number.isFinite(payload.score)
       ? payload.score
       : payload.isCorrect
-        ? 1
+        ? (itemMaxPoints || 1)
         : 0;
+  if (itemMaxPoints > 0 && score > itemMaxPoints) {
+    return sendError(res, `Score cannot exceed maxPoints (${itemMaxPoints})`, 400, "VALIDATION_ERROR");
+  }
 
   const updated = await updateQuizAttemptById(attempt._id, {
     status: "graded",
@@ -826,7 +862,7 @@ export async function getStudentStats(req, res) {
       type: item.type,
       quizSubtype: item.quizSubtype || null,
       topicTitle: topicMap.get(item.topicId.toString()) || "",
-      status: !a ? "none" : a.gradingStatus === "pending" ? "pending" : a.isCorrect ? "correct" : "incorrect",
+      status: !a ? "none" : item.type === "practice" ? "attempted" : a.gradingStatus === "pending" ? "pending" : a.isCorrect ? "correct" : "incorrect",
       responseText: a?.responseText || null,
       feedback: a?.feedback || null,
       submittedAt: a?.submittedAt || null,
@@ -913,12 +949,14 @@ export async function getClassStats(req, res) {
   const membership = await getMembership(req.user.id, classroom._id);
   if (!membership || membership.role !== "teacher") return sendError(res, "Forbidden", 403, "FORBIDDEN");
 
-  const [memberships, allItems, allAttempts, topicCount, topics] = await Promise.all([
+  const [memberships, allItems, allAttempts, topicCount, topics, aiInteractionMap, learningViewMap] = await Promise.all([
     listMemberships(classroom._id),
     listTopicItemsByClass(classroom._id),
     listQuizAttemptsByClass(classroom._id),
     countTopicsByClass(classroom._id),
     listTopicsByClass(classroom._id),
+    groupedCountsByClass(classroom._id),
+    groupedViewCountsByClass(classroom._id),
   ]);
 
   // Summary counts
@@ -958,20 +996,42 @@ export async function getClassStats(req, res) {
 
   const gradableItems = allItems.filter((i) => i.type === "quiz" || i.type === "practice");
 
+  // Total possible points across all gradable items
+  const totalPossiblePoints = gradableItems.reduce((sum, i) => sum + (i.maxPoints ?? 0), 0);
+  // Map itemId → maxPoints for quick lookup
+  const itemMaxPointsMap = new Map(gradableItems.map((i) => [i._id.toString(), i.maxPoints ?? 0]));
+  // Map itemId → type for quiz vs practice breakdown
+  const itemTypeMap = new Map(allItems.map((i) => [i._id.toString(), i.type]));
+
   // Per-student breakdown
   const studentBreakdowns = studentIds.map((sid) => {
     const attempts = attemptsByStudent.get(sid) || [];
     const attempted = attempts.length;
     const correct = attempts.filter((a) => a.isCorrect === true).length;
+    const pointsEarned = attempts.reduce((sum, a) => sum + (typeof a.score === "number" ? a.score : 0), 0);
     const sortedByDate = [...attempts].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+
+    const quizAttempts = attempts.filter((a) => itemTypeMap.get(a.itemId.toString()) === "quiz").length;
+    const quizCorrect = attempts.filter((a) => itemTypeMap.get(a.itemId.toString()) === "quiz" && a.isCorrect === true).length;
+    const practiceAttempts = attempts.filter((a) => itemTypeMap.get(a.itemId.toString()) === "practice").length;
+    const pendingGrading = attempts.filter((a) => a.gradingStatus === "pending").length;
+
     return {
       id: sid,
       name: studentNameMap.get(sid) || "Unknown",
       attempted,
       correct,
       total: gradableItems.length,
+      pointsEarned,
+      totalPossiblePoints,
       successRate: attempted > 0 ? Math.round((correct / attempted) * 100) : null,
       lastActivity: sortedByDate[0]?.updatedAt || null,
+      quizAttempts,
+      quizCorrect,
+      practiceAttempts,
+      pendingGrading,
+      learningItemsViewed: learningViewMap[sid] || 0,
+      aiInteractions: aiInteractionMap[sid] || 0,
     };
   }).sort((a, b) => b.attempted - a.attempted);
 
@@ -981,15 +1041,20 @@ export async function getClassStats(req, res) {
     const attempted = attempts.length;
     const correct = attempts.filter((a) => a.isCorrect === true).length;
     const correctRate = attempted > 0 ? Math.round((correct / attempted) * 100) : null;
+    const avgScore = attempted > 0
+      ? +(attempts.reduce((sum, a) => sum + (typeof a.score === "number" ? a.score : 0), 0) / attempted).toFixed(2)
+      : null;
     return {
       id: item._id.toString(),
       title: item.title,
       type: item.type,
       quizSubtype: item.quizSubtype || null,
       topicTitle: topicMap.get(item.topicId.toString()) || "",
+      maxPoints: item.maxPoints ?? 0,
       attempted,
       correct,
       correctRate,
+      avgScore,
       studentCount,
     };
   });
@@ -1003,9 +1068,12 @@ export async function getClassStats(req, res) {
       name: studentNameMap.get(sid) || "Unknown",
       cells: gradableItems.map((item) => {
         const a = attemptByItem.get(item._id.toString());
-        if (!a) return "none";
-        if (a.gradingStatus === "pending") return "pending";
-        return a.isCorrect ? "correct" : "incorrect";
+        if (!a) return { status: "none", score: null };
+        if (a.gradingStatus === "pending") return { status: "pending", score: null };
+        return {
+          status: a.isCorrect ? "correct" : "incorrect",
+          score: typeof a.score === "number" ? a.score : null,
+        };
       }),
     };
   });
@@ -1014,6 +1082,7 @@ export async function getClassStats(req, res) {
     id: i._id.toString(),
     title: i.title,
     type: i.type,
+    maxPoints: i.maxPoints ?? 0,
   }));
 
   return sendSuccess(res, {
@@ -1041,26 +1110,101 @@ export async function getMyClassProgress(req, res) {
 
   const attemptedItemIds = new Set(myAttempts.map((a) => a.itemId.toString()));
   const correctItemIds = new Set(myAttempts.filter((a) => a.isCorrect === true).map((a) => a.itemId.toString()));
+  const attemptByItemId = new Map(myAttempts.map((a) => [a.itemId.toString(), a]));
 
   const gradedItems = allItems.filter((i) => i.type === "quiz" || i.type === "practice");
   const attemptedCount = gradedItems.filter((i) => attemptedItemIds.has(i._id.toString())).length;
   const correctCount = gradedItems.filter((i) => correctItemIds.has(i._id.toString())).length;
 
-  const items = allItems.map((i) => ({
-    id: i._id.toString(),
-    topicId: i.topicId.toString(),
-    type: i.type,
-    title: i.title,
-    attempted: i.type !== "learning" ? attemptedItemIds.has(i._id.toString()) : null,
-  }));
+  const pointsEarned = myAttempts.reduce((sum, a) => sum + (typeof a.score === "number" ? a.score : 0), 0);
+  const totalPossiblePoints = gradedItems.reduce((sum, i) => sum + (i.maxPoints ?? 0), 0);
+
+  const items = allItems.map((i) => {
+    const attempt = attemptByItemId.get(i._id.toString());
+    return {
+      id: i._id.toString(),
+      topicId: i.topicId.toString(),
+      type: i.type,
+      title: i.title,
+      maxPoints: i.maxPoints ?? 0,
+      attempted: i.type !== "learning" ? attemptedItemIds.has(i._id.toString()) : null,
+      score: attempt ? (typeof attempt.score === "number" ? attempt.score : null) : null,
+      isCorrect: attempt ? (typeof attempt.isCorrect === "boolean" ? attempt.isCorrect : null) : null,
+    };
+  });
 
   return sendSuccess(res, {
     totalItems: allItems.length,
     gradedItems: gradedItems.length,
     attemptedItems: attemptedCount,
     correctItems: correctCount,
+    pointsEarned,
+    totalPossiblePoints,
     items,
   });
+}
+
+export async function getMyDashboard(req, res) {
+  const classroom = await getClassById(req.params.id);
+  if (!classroom) return sendError(res, "Class not found", 404, "NOT_FOUND");
+  const membership = await getMembership(req.user.id, classroom._id);
+  if (!membership || membership.role !== "student") return sendError(res, "Forbidden", 403, "FORBIDDEN");
+
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const [myAttempts, upcomingItems, recentNewItems, allItems] = await Promise.all([
+    listQuizAttemptsByUserInClass(req.user.id, classroom._id),
+    listUpcomingDeadlines(classroom._id, now),
+    listRecentItems(classroom._id, sevenDaysAgo),
+    listTopicItemsByClass(classroom._id),
+  ]);
+
+  const itemById = new Map(allItems.map((i) => [i._id.toString(), i]));
+
+  // Last 10 graded attempts with item details
+  const gradedAttempts = myAttempts
+    .filter((a) => a.gradingStatus !== "pending" && a.status === "graded")
+    .sort((a, b) => new Date(b.gradedAt || b.updatedAt) - new Date(a.gradedAt || a.updatedAt))
+    .slice(0, 10);
+
+  const recentScores = gradedAttempts.map((a) => {
+    const item = itemById.get(a.itemId.toString());
+    return {
+      attemptId: a._id.toString(),
+      itemId: a.itemId.toString(),
+      title: item?.title || "Unknown",
+      type: item?.type || "quiz",
+      score: typeof a.score === "number" ? a.score : null,
+      maxPoints: item?.maxPoints ?? 0,
+      isCorrect: a.isCorrect,
+      gradedAt: a.gradedAt || a.updatedAt || null,
+    };
+  });
+
+  // Upcoming deadlines with daysLeft
+  const upcomingDeadlines = upcomingItems.map((item) => {
+    const deadline = new Date(item.deadline);
+    const msLeft = deadline.getTime() - now.getTime();
+    const daysLeft = Math.ceil(msLeft / (1000 * 60 * 60 * 24));
+    return {
+      id: item._id.toString(),
+      title: item.title,
+      type: item.type,
+      deadline: item.deadline,
+      daysLeft,
+    };
+  });
+
+  // Items added in the last 7 days (updates feed)
+  const updates = recentNewItems.map((item) => ({
+    id: item._id.toString(),
+    title: item.title,
+    type: item.type,
+    createdAt: item.createdAt,
+  }));
+
+  return sendSuccess(res, { recentScores, upcomingDeadlines, updates });
 }
 
 export async function deleteClassHandler(req, res) {
@@ -1080,4 +1224,14 @@ export async function deleteClassHandler(req, res) {
   await deleteMembershipsByClassId(classroom._id);
   await deleteClassById(classroom._id);
   return sendSuccess(res, { success: true });
+}
+
+export async function getStudentAIInteractions(req, res) {
+  const classroom = await getClassById(req.params.id);
+  if (!classroom) return sendError(res, "Class not found", 404, "NOT_FOUND");
+  const membership = await getMembership(req.user.id, classroom._id);
+  if (!membership || membership.role !== "teacher") return sendError(res, "Forbidden", 403, "FORBIDDEN");
+
+  const interactions = await listByStudentInClass(req.params.studentId, classroom._id);
+  return sendSuccess(res, { interactions });
 }

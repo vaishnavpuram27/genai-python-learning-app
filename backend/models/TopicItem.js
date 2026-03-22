@@ -32,6 +32,9 @@ const topicItemSchema = new mongoose.Schema(
     practiceHints:        { type: [String], default: [] },
     practiceCodeStarter:  { type: String, default: "" },
     practiceModelAnswer:  { type: String, default: "" },
+    maxPoints:            { type: Number, default: 0 },
+    deadline:             { type: Date, default: null },
+    isPublished:          { type: Boolean, default: true },
     order:                { type: Number, default: 0 },
     practiceTestMode:     { type: Boolean, default: false },
     practiceTestCases: {

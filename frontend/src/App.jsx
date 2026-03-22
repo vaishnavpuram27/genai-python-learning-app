@@ -41,6 +41,7 @@ function createTopicItemDraft(overrides = {}) {
     quizOptionInput: "",
     quizOptionEditIndex: -1,
     quizAnswer: "",
+    maxPoints: 0,
     ...overrides,
   };
 }
@@ -869,6 +870,12 @@ export default function App() {
   const [classStatsLoading, setClassStatsLoading] = useState(false);
   const [studentStatsData, setStudentStatsData] = useState(null);
   const [studentStatsLoading, setStudentStatsLoading] = useState(false);
+  const [studentAILog, setStudentAILog] = useState(null);
+  const [studentAILogLoading, setStudentAILogLoading] = useState(false);
+  const [itemResponseData, setItemResponseData] = useState(null); // item from studentStatsData clicked for detail view
+  // Phase 3 — student dashboard
+  const [myDashboard, setMyDashboard] = useState(null);
+  const [myDashboardLoading, setMyDashboardLoading] = useState(false);
   // Phase 5 — student progress
   const [myClassProgress, setMyClassProgress] = useState(null);
   const [allClassProgress, setAllClassProgress] = useState({});
@@ -894,6 +901,10 @@ export default function App() {
   const [editingItemQuizOptionInput, setEditingItemQuizOptionInput] = useState("");
   const [editingItemQuizOptionEditIndex, setEditingItemQuizOptionEditIndex] = useState(-1);
   const [editingItemQuizAnswer, setEditingItemQuizAnswer] = useState("");
+  const [editingItemMaxPoints, setEditingItemMaxPoints] = useState(0);
+  const [editingItemDeadline, setEditingItemDeadline] = useState("");
+  const [editingItemIsPublished, setEditingItemIsPublished] = useState(true);
+  const [quizGradeScore, setQuizGradeScore] = useState("");
   const [practiceMeta, setPracticeMeta] = useState(null);
   const [practiceError, setPracticeError] = useState("");
   const [quizMeta, setQuizMeta] = useState(null);
@@ -914,6 +925,8 @@ export default function App() {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState("");
+  const [thinkingIdx, setThinkingIdx] = useState(0);
+  const THINKING_WORDS = ["Thinking", "Cooking", "Processing", "Almost there", "On it"];
   const [copiedMsgIdx, setCopiedMsgIdx] = useState(null);
   const [importMcq, setImportMcq] = useState(null);
   const [importMcqTopicId, setImportMcqTopicId] = useState("");
@@ -934,11 +947,15 @@ export default function App() {
   const [importPlan, setImportPlan] = useState(null);
   const [importPlanSaving, setImportPlanSaving] = useState(false);
   const [importPlanError, setImportPlanError] = useState("");
+  const [importPlanSelected, setImportPlanSelected] = useState(new Set()); // "ti-ii" keys
+  const [importPlanExpanded, setImportPlanExpanded] = useState(new Set()); // "ti-ii" keys
+  const [importPlanTopicMap, setImportPlanTopicMap] = useState({}); // ti → topicId or "__new__"
   const [importLearning, setImportLearning] = useState(null);
   const [importLearningTopicId, setImportLearningTopicId] = useState("");
   const [importLearningNewTopic, setImportLearningNewTopic] = useState("");
   const [importLearningSaving, setImportLearningSaving] = useState(false);
   const [importLearningError, setImportLearningError] = useState("");
+  const [importLearningBodyEdit, setImportLearningBodyEdit] = useState(false);
   const [importLearningAll, setImportLearningAll] = useState(null); // array of items for bulk import
   const [importLearningAllTopicId, setImportLearningAllTopicId] = useState("");
   const [importLearningAllNewTopic, setImportLearningAllNewTopic] = useState("");
@@ -1173,6 +1190,30 @@ export default function App() {
     return () => { cancelled = true; };
   }, [user, route.page, activeClassId, route.studentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // student AI interaction log fetch (used by student-stats and ai-log pages)
+  useEffect(() => {
+    if (!user || !["student-stats", "ai-log"].includes(route.page) || !activeClassId || !route.studentId) {
+      setStudentAILog(null);
+      return;
+    }
+    let cancelled = false;
+    setStudentAILogLoading(true);
+    async function fetchAILog() {
+      try {
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/students/${route.studentId}/ai-interactions`, {
+          headers: { ...authHeaders() },
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setStudentAILog(data?.data?.interactions || []);
+      } catch { /* ignore */ } finally {
+        if (!cancelled) setStudentAILogLoading(false);
+      }
+    }
+    fetchAILog();
+    return () => { cancelled = true; };
+  }, [user, route.page, activeClassId, route.studentId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Phase 5 — fetch student's own progress for current class
   useEffect(() => {
     if (!user || user.role !== "student" || !activeClassId || route.page !== "class") {
@@ -1190,6 +1231,27 @@ export default function App() {
       } catch { /* ignore */ }
     }
     fetchMyProgress();
+    return () => { cancelled = true; };
+  }, [user, activeClassId, route.page]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Phase 3 — fetch student dashboard
+  useEffect(() => {
+    if (!user || user.role !== "student" || !activeClassId || route.page !== "dashboard") return;
+    let cancelled = false;
+    setMyDashboardLoading(true);
+    async function fetchDashboard() {
+      try {
+        const res = await fetch(`${API_BASE}/classes/${activeClassId}/my-dashboard`, {
+          headers: { ...authHeaders() },
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setMyDashboard(data?.data || null);
+      } catch { /* ignore */ } finally {
+        if (!cancelled) setMyDashboardLoading(false);
+      }
+    }
+    fetchDashboard();
     return () => { cancelled = true; };
   }, [user, activeClassId, route.page]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1366,6 +1428,21 @@ export default function App() {
       return;
     }
     if (route.page === "student-stats") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(null);
+      return;
+    }
+    if (route.page === "dashboard") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(null);
+      return;
+    }
+    if (route.page === "ai-log") {
+      setActiveClassId(route.classId);
+      setActiveLessonId(null);
+      return;
+    }
+    if (route.page === "item-response") {
       setActiveClassId(route.classId);
       setActiveLessonId(null);
       return;
@@ -1858,6 +1935,22 @@ export default function App() {
     setRoute({ page: "student-stats", classId, studentId, lessonId: null, itemId: null });
   }
 
+  function navigateToAILog(classId, studentId, itemKey, itemLabel, itemType) {
+    window.history.pushState({}, "", `/classes/${classId}/students/${studentId}/ai-log`);
+    setRoute({ page: "ai-log", classId, studentId, itemKey, itemLabel, itemType, lessonId: null, itemId: null });
+  }
+
+  function navigateToItemResponse(classId, studentId, item) {
+    setItemResponseData(item);
+    window.history.pushState({}, "", `/classes/${classId}/students/${studentId}/response`);
+    setRoute({ page: "item-response", classId, studentId, lessonId: null, itemId: null });
+  }
+
+  function navigateToMyDashboard(classId) {
+    window.history.pushState({}, "", `/classes/${classId}/my-dashboard`);
+    setRoute({ page: "dashboard", classId, lessonId: null, itemId: null, studentId: null });
+  }
+
   function navigateToItem(classId, navItem) {
     if (!navItem) return;
     if (navItem.type === "practice") navigateToPractice(classId, navItem.id);
@@ -2036,6 +2129,9 @@ export default function App() {
       title: draft.title.trim(),
       type: draft.type,
     };
+    if (draft.type === "quiz" || draft.type === "practice") {
+      payload.maxPoints = Number(draft.maxPoints) || 0;
+    }
     if (draft.type === "quiz") {
       payload.quizSubtype = draft.quizSubtype;
       payload.quizQuestion = draft.quizQuestion.trim();
@@ -2158,6 +2254,9 @@ export default function App() {
     setEditingItemQuizOptionInput("");
     setEditingItemQuizOptionEditIndex(-1);
     setEditingItemQuizAnswer(item.quizAnswer || "");
+    setEditingItemMaxPoints(item.maxPoints ?? 0);
+    setEditingItemDeadline(item.deadline ? new Date(item.deadline).toISOString().slice(0, 16) : "");
+    setEditingItemIsPublished(item.isPublished !== false);
   }
 
   async function saveEditItem(topicId, itemId) {
@@ -2186,6 +2285,11 @@ export default function App() {
       title: editingItemTitle.trim(),
       type: editingItemType,
     };
+    if (editingItemType === "quiz" || editingItemType === "practice") {
+      payload.maxPoints = Number(editingItemMaxPoints) || 0;
+    }
+    payload.deadline = editingItemDeadline ? new Date(editingItemDeadline).toISOString() : null;
+    payload.isPublished = editingItemIsPublished;
     if (editingItemType === "learning") {
       payload.practiceBody         = editingItemBody;
       payload.practiceInstructions = editingItemInstructions;
@@ -2603,6 +2707,7 @@ export default function App() {
           body: JSON.stringify({
             isCorrect,
             feedback: quizGradeFeedback.trim(),
+            ...(quizGradeScore !== "" && { score: Number(quizGradeScore) }),
           }),
         }
       );
@@ -2638,6 +2743,15 @@ export default function App() {
       chatMessagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [chatMessages]);
+
+  useEffect(() => {
+    if (!chatLoading) return;
+    setThinkingIdx(0);
+    const id = setInterval(() => {
+      setThinkingIdx((prev) => (prev + 1) % THINKING_WORDS.length);
+    }, 1800);
+    return () => clearInterval(id);
+  }, [chatLoading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 1A: Try to parse import content; if malformed, auto-repair via backend then re-parse
   async function repairAndImport(content, contentType, parseFn, onSuccess) {
@@ -2678,6 +2792,9 @@ export default function App() {
     }
     if (activeLessonId) {
       context.lessonId = activeLessonId;
+    }
+    if (route.itemId) {
+      context.itemId = route.itemId;
     }
 
     // Get code from Monaco editor
@@ -2952,11 +3069,50 @@ export default function App() {
             />
 
             <label>Question</label>
-            <textarea
-              value={importMcq.question}
-              onChange={(e) => setImportMcq({ ...importMcq, question: e.target.value })}
-              rows={3}
-            />
+            {(() => {
+              const q = importMcq.question || "";
+              const codeMatch = q.match(/^([\s\S]*?)```(\w*)\n([\s\S]*?)```([\s\S]*)$/);
+              if (codeMatch) {
+                const [, textBefore, lang, code, textAfter] = codeMatch;
+                return (
+                  <div className="mcq-question-split">
+                    {textBefore.trim() && (
+                      <textarea
+                        value={textBefore.trim()}
+                        rows={2}
+                        onChange={(e) => setImportMcq({ ...importMcq, question: `${e.target.value}\n\`\`\`${lang}\n${code}\`\`\`${textAfter}` })}
+                      />
+                    )}
+                    <div className="mcq-code-window">
+                      <div className="mcq-code-window-bar">
+                        <span className="mcq-code-window-lang">{lang || "code"}</span>
+                        <div className="mcq-code-window-dots"><span /><span /><span /></div>
+                      </div>
+                      <textarea
+                        className="mcq-code-window-editor"
+                        value={code}
+                        spellCheck={false}
+                        onChange={(e) => setImportMcq({ ...importMcq, question: `${textBefore}\`\`\`${lang}\n${e.target.value}\`\`\`${textAfter}` })}
+                      />
+                    </div>
+                    {textAfter.trim() && (
+                      <textarea
+                        value={textAfter.trim()}
+                        rows={2}
+                        onChange={(e) => setImportMcq({ ...importMcq, question: `${textBefore}\`\`\`${lang}\n${code}\`\`\`\n${e.target.value}` })}
+                      />
+                    )}
+                  </div>
+                );
+              }
+              return (
+                <textarea
+                  value={q}
+                  onChange={(e) => setImportMcq({ ...importMcq, question: e.target.value })}
+                  rows={3}
+                />
+              );
+            })()}
 
             <label>
               Options
@@ -3475,21 +3631,30 @@ export default function App() {
     if (!activeClassId || !importPlan) return;
     setImportPlanError("");
     if (!importPlan.planTitle?.trim()) { setImportPlanError("Plan title is required."); return; }
-    if (!importPlan.topics?.length) { setImportPlanError("Plan has no topics."); return; }
+    const selectedCount = importPlanSelected.size;
+    if (selectedCount === 0) { setImportPlanError("Select at least one item to import."); return; }
     setImportPlanSaving(true);
     try {
-      for (const topic of importPlan.topics) {
-        const topicRes = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeaders() },
-          body: JSON.stringify({ title: topic.title }),
-        });
-        const topicData = await topicRes.json();
-        if (!topicRes.ok) { setImportPlanError(topicData?.error?.message || "Failed to create topic."); setImportPlanSaving(false); return; }
-        const createdTopic = topicData?.data?.topic;
-        const topicId = createdTopic?.id || createdTopic?._id;
-        setTopics((prev) => [...prev, createdTopic]);
-        for (const item of (topic.items || [])) {
+      for (const [ti, topic] of (importPlan.topics || []).entries()) {
+        const selectedItems = (topic.items || []).filter((_, ii) => importPlanSelected.has(`${ti}-${ii}`));
+        if (selectedItems.length === 0) continue;
+        const mappedTopicId = importPlanTopicMap[ti];
+        let topicId;
+        if (mappedTopicId && mappedTopicId !== "__new__") {
+          topicId = mappedTopicId;
+        } else {
+          const topicRes = await fetch(`${API_BASE}/classes/${activeClassId}/topics`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ title: topic.title }),
+          });
+          const topicData = await topicRes.json();
+          if (!topicRes.ok) { setImportPlanError(topicData?.error?.message || "Failed to create topic."); setImportPlanSaving(false); return; }
+          const createdTopic = topicData?.data?.topic;
+          topicId = createdTopic?.id || createdTopic?._id;
+          setTopics((prev) => [...prev, createdTopic]);
+        }
+        for (const item of selectedItems) {
           const answerIndex = "ABCDEFGHIJ".indexOf((item.quizAnswer || "").toUpperCase());
           const quizAnswer = item.quizSubtype === "mcq" && answerIndex >= 0 && Array.isArray(item.quizOptions) && answerIndex < item.quizOptions.length
             ? item.quizOptions[answerIndex]
@@ -3528,7 +3693,7 @@ export default function App() {
         }
       }
       setImportPlan(null);
-      setToast({ type: "success", message: "Lesson plan imported!" });
+      setToast({ type: "success", message: `Imported ${selectedCount} item(s)!` });
     } catch {
       setImportPlanError("Server not reachable.");
     } finally {
@@ -3538,6 +3703,93 @@ export default function App() {
 
   function renderImportPlanModal() {
     if (!importPlan) return null;
+
+    const toggleItem = (key) => {
+      setImportPlanSelected((prev) => {
+        const next = new Set(prev);
+        next.has(key) ? next.delete(key) : next.add(key);
+        return next;
+      });
+    };
+
+    const toggleTopic = (ti, items) => {
+      const keys = (items || []).map((_, ii) => `${ti}-${ii}`);
+      const allSelected = keys.every((k) => importPlanSelected.has(k));
+      setImportPlanSelected((prev) => {
+        const next = new Set(prev);
+        keys.forEach((k) => allSelected ? next.delete(k) : next.add(k));
+        return next;
+      });
+    };
+
+    const toggleExpand = (key) => {
+      setImportPlanExpanded((prev) => {
+        const next = new Set(prev);
+        next.has(key) ? next.delete(key) : next.add(key);
+        return next;
+      });
+    };
+
+    const selectedCount = importPlanSelected.size;
+
+    const renderItemPreview = (item) => {
+      if (item.type === "learning") {
+        return (
+          <div className="plan-learning-preview">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+              {item.body || ""}
+            </ReactMarkdown>
+          </div>
+        );
+      }
+      if (item.type === "quiz") {
+        const correctIdx = "ABCDEFGHIJ".indexOf((item.quizAnswer || "").toUpperCase());
+        return (
+          <div style={{ marginTop: "0.4rem" }}>
+            <div className="plan-learning-preview" style={{ marginBottom: "0.4rem" }}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                {item.quizQuestion || ""}
+              </ReactMarkdown>
+            </div>
+            {item.quizSubtype === "mcq" && Array.isArray(item.quizOptions) && (
+              <ul style={{ margin: 0, paddingLeft: "1.2rem", fontSize: "0.82rem" }}>
+                {item.quizOptions.map((opt, oi) => {
+                  const isCorrect = oi === correctIdx || opt === item.quizAnswer;
+                  return (
+                    <li key={oi} style={{ color: isCorrect ? "var(--accent)" : "var(--text-secondary)", fontWeight: isCorrect ? 600 : 400, marginBottom: "0.1rem" }}>
+                      <strong style={{ marginRight: 4 }}>{String.fromCharCode(65 + oi)}.</strong>{opt}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {item.explanation && (
+              <div className="mcq-explanation-callout" style={{ marginTop: "0.5rem", fontSize: "0.78rem" }}>
+                <strong>Explanation:</strong> {item.explanation}
+              </div>
+            )}
+          </div>
+        );
+      }
+      if (item.type === "practice") {
+        return (
+          <div style={{ marginTop: "0.4rem", fontSize: "0.82rem" }}>
+            {item.instructions && <p style={{ margin: "0 0 0.25rem", fontStyle: "italic" }}>{item.instructions}</p>}
+            {item.codeStarter && (
+              <div className="mcq-code-window">
+                <div className="mcq-code-window-bar">
+                  <span className="mcq-code-window-lang">python</span>
+                  <div className="mcq-code-window-dots"><span /><span /><span /></div>
+                </div>
+                <pre style={{ margin: 0, background: "#1e1e1e", color: "#d4d4d4", padding: "8px 12px", fontSize: "0.78rem", overflowX: "auto" }}><code>{item.codeStarter}</code></pre>
+              </div>
+            )}
+          </div>
+        );
+      }
+      return null;
+    };
+
     return (
       <div className="modal-overlay" onClick={() => setImportPlan(null)}>
         <div className="modal-content mcq-modal plan-modal" onClick={(e) => e.stopPropagation()}>
@@ -3556,29 +3808,86 @@ export default function App() {
               onChange={(e) => setImportPlan({ ...importPlan, planTitle: e.target.value })}
             />
             <div className="plan-preview">
-              {(importPlan.topics || []).map((topic, ti) => (
-                <div key={ti} className="plan-topic-block">
-                  <div className="plan-topic-title">{topic.title}</div>
-                  <div className="plan-items-list">
-                    {(topic.items || []).map((item, ii) => (
-                      <div key={ii} className="plan-item-row">
-                        <span className={`topic-type type-${item.type}`}>{item.type}</span>
-                        <span className="plan-item-title">{item.title || "Untitled"}</span>
-                        {item.testMode && <span className="teacher-only-badge">Tests</span>}
-                      </div>
-                    ))}
+              {(importPlan.topics || []).map((topic, ti) => {
+                const topicKeys = (topic.items || []).map((_, ii) => `${ti}-${ii}`);
+                const allTopicSelected = topicKeys.length > 0 && topicKeys.every((k) => importPlanSelected.has(k));
+                const someTopicSelected = topicKeys.some((k) => importPlanSelected.has(k));
+                return (
+                  <div key={ti} className="plan-topic-block">
+                    <div className="plan-topic-title">
+                      <input
+                        type="checkbox"
+                        checked={allTopicSelected}
+                        ref={(el) => { if (el) el.indeterminate = someTopicSelected && !allTopicSelected; }}
+                        onChange={() => toggleTopic(ti, topic.items)}
+                        style={{ cursor: "pointer" }}
+                      />
+                      <span>{topic.title}</span>
+                      <span className="stats-meta" style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>
+                        {topicKeys.filter((k) => importPlanSelected.has(k)).length} / {topicKeys.length} selected
+                      </span>
+                    </div>
+                    <div className="plan-topic-save-row">
+                      <label className="plan-topic-save-label">Save to Topic</label>
+                      <select
+                        value={importPlanTopicMap[ti] || "__new__"}
+                        onChange={(e) => setImportPlanTopicMap((prev) => ({ ...prev, [ti]: e.target.value }))}
+                        className="plan-topic-save-select"
+                      >
+                        <option value="__new__">+ Create "{topic.title}"</option>
+                        {topics.map((t) => <option key={t.id || t._id} value={t.id || t._id}>{t.title}</option>)}
+                      </select>
+                    </div>
+                    <div className="plan-items-list">
+                      {(topic.items || []).map((item, ii) => {
+                        const key = `${ti}-${ii}`;
+                        const isSelected = importPlanSelected.has(key);
+                        const isExpanded = importPlanExpanded.has(key);
+                        return (
+                          <div key={ii} style={{ borderBottom: "1px solid var(--border)" }}>
+                            <div className="plan-item-row">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleItem(key)}
+                                style={{ cursor: "pointer" }}
+                              />
+                              <span className={`topic-type type-${item.type}`}>{item.type}</span>
+                              <span className="plan-item-title">{item.title || "Untitled"}</span>
+                              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                                {item.testMode && <span className="teacher-only-badge">Tests</span>}
+                                <button
+                                  type="button"
+                                  className="ghost-button"
+                                  style={{ padding: "2px 8px", fontSize: "0.75rem", whiteSpace: "nowrap" }}
+                                  onClick={() => toggleExpand(key)}
+                                >
+                                  {isExpanded ? "▲ Hide" : "▼ Preview"}
+                                </button>
+                              </div>
+                            </div>
+                            {isExpanded && (
+                              <div className="plan-item-preview">
+                                {renderItemPreview(item)}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
             <p className="plan-summary-note">
-              This will create <strong>{importPlan.topics?.length || 0}</strong> topic(s) and{" "}
-              <strong>{importPlan.topics?.reduce((acc, t) => acc + (t.items?.length || 0), 0)}</strong> item(s) in your class.
+              {selectedCount === 0
+                ? <span style={{ color: "var(--error, #c62828)" }}>No items selected.</span>
+                : <><strong>{selectedCount}</strong> item{selectedCount !== 1 ? "s" : ""} selected for import.</>}
             </p>
           </div>
           <div className="mcq-modal-footer">
-            <button className="primary-button" disabled={importPlanSaving} onClick={handleImportPlanSave}>
-              {importPlanSaving ? "Importing…" : "Import All"}
+            <button className="primary-button" disabled={importPlanSaving || selectedCount === 0} onClick={handleImportPlanSave}>
+              {importPlanSaving ? "Importing…" : `Import ${selectedCount} item${selectedCount !== 1 ? "s" : ""}`}
             </button>
             <button className="ghost-button" onClick={() => setImportPlan(null)}>Cancel</button>
           </div>
@@ -3665,12 +3974,30 @@ export default function App() {
               placeholder="Short label, e.g. What is a Loop?"
             />
 
-            <label>Body / Explanation</label>
-            <textarea
-              value={importLearning.body}
-              onChange={(e) => setImportLearning({ ...importLearning, body: e.target.value })}
-              rows={4}
-            />
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, marginBottom: 5 }}>
+              <label style={{ margin: 0 }}>Body / Explanation</label>
+              <button
+                type="button"
+                className="ghost-button"
+                style={{ padding: "2px 10px", fontSize: "0.75rem" }}
+                onClick={() => setImportLearningBodyEdit((v) => !v)}
+              >
+                {importLearningBodyEdit ? "Preview" : "Edit"}
+              </button>
+            </div>
+            {importLearningBodyEdit ? (
+              <textarea
+                value={importLearning.body}
+                onChange={(e) => setImportLearning({ ...importLearning, body: e.target.value })}
+                rows={10}
+              />
+            ) : (
+              <div className="import-learning-body-preview plan-learning-preview">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                  {importLearning.body || ""}
+                </ReactMarkdown>
+              </div>
+            )}
 
             <label>Instructions (optional)</label>
             <textarea
@@ -4073,6 +4400,15 @@ export default function App() {
                                 repairAndImport(msg.content, "lesson-plan-json", parseLessonPlanFromMessage, (plan) => {
                                   setImportPlan(plan);
                                   setImportPlanError("");
+                                  // Select all items by default
+                                  const allKeys = new Set();
+                                  (plan.topics || []).forEach((t, ti) => (t.items || []).forEach((_, ii) => allKeys.add(`${ti}-${ii}`)));
+                                  setImportPlanSelected(allKeys);
+                                  setImportPlanExpanded(new Set());
+                                  // Default each topic to "__new__" (create from AI name)
+                                  const topicMap = {};
+                                  (plan.topics || []).forEach((_, ti) => { topicMap[ti] = "__new__"; });
+                                  setImportPlanTopicMap(topicMap);
                                 });
                               }}
                             >
@@ -4117,6 +4453,7 @@ export default function App() {
                                     setImportLearningTopicId(topics[0]?.id || "__new__");
                                     setImportLearningError("");
                                     setImportLearningNewTopic("");
+                                    setImportLearningBodyEdit(false);
                                   });
                                 }}
                               >
@@ -4133,14 +4470,18 @@ export default function App() {
                     )}
                   </div>
                   <div className="chat-msg-content">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{stripMachineBlocks(msg.content)}</ReactMarkdown>
+                    {chatLoading && i === chatMessages.length - 1 && msg.role === "assistant" ? (
+                      <p className="chat-typing" style={{ margin: 0 }}>{THINKING_WORDS[thinkingIdx]}…</p>
+                    ) : (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{stripMachineBlocks(msg.content)}</ReactMarkdown>
+                    )}
                   </div>
                 </div>
               ))}
               {chatLoading && chatMessages[chatMessages.length - 1]?.role !== "assistant" && (
                 <div className="chat-msg chat-msg-assistant">
                   <span className="chat-msg-role">AI</span>
-                  <p className="chat-msg-content chat-typing">Thinking...</p>
+                  <p className="chat-msg-content chat-typing" style={{ margin: 0 }}>{THINKING_WORDS[thinkingIdx]}…</p>
                 </div>
               )}
               {chatError && <p className="chat-error">{chatError}</p>}
@@ -4585,6 +4926,15 @@ export default function App() {
                 Add topic
               </button>
             )}
+            {!isTeacher && activeClassId && (
+              <button
+                className="accent-button"
+                type="button"
+                onClick={() => navigateToMyDashboard(activeClassId)}
+              >
+                My Dashboard
+              </button>
+            )}
             {isTeacher && activeClass && (
               <button className="ghost-button" type="button" onClick={handleDeleteClass}>
                 Delete class
@@ -4673,6 +5023,7 @@ export default function App() {
                             <th>Attempted</th>
                             <th>Correct</th>
                             <th>Success Rate</th>
+                            <th>AI Chats</th>
                             <th>Progress</th>
                             <th>Last Active</th>
                           </tr>
@@ -4695,6 +5046,19 @@ export default function App() {
                                   {s.successRate !== null
                                     ? <span className={`stats-rate-pill ${s.successRate >= 70 ? "rate-good" : s.successRate >= 40 ? "rate-mid" : "rate-low"}`}>{s.successRate}%</span>
                                     : <span className="stats-meta">—</span>}
+                                </td>
+                                <td>
+                                  {s.aiInteractions > 0 ? (
+                                    <button
+                                      className="ghost-button"
+                                      style={{ padding: "2px 8px", fontSize: "0.8rem" }}
+                                      type="button"
+                                      onClick={() => navigateToStudentStats(activeClassId, s.id)}
+                                      title="View AI chat log"
+                                    >
+                                      {s.aiInteractions} chat{s.aiInteractions !== 1 ? "s" : ""}
+                                    </button>
+                                  ) : <span className="stats-meta">—</span>}
                                 </td>
                                 <td>
                                   <div className="stats-mini-bar">
@@ -5141,6 +5505,36 @@ export default function App() {
                                   )}
                                 </div>
                               )}
+                              {(editingItemType === "quiz" || editingItemType === "practice") && (
+                                <label className="login-field" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                                  <span style={{ whiteSpace: "nowrap" }}>Max points</span>
+                                  <input
+                                    className="class-input"
+                                    type="number"
+                                    min="0"
+                                    style={{ width: "80px" }}
+                                    value={editingItemMaxPoints}
+                                    onChange={(event) => setEditingItemMaxPoints(Number(event.target.value) || 0)}
+                                  />
+                                </label>
+                              )}
+                              <label className="login-field" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                                <span style={{ whiteSpace: "nowrap" }}>Deadline</span>
+                                <input
+                                  className="class-input"
+                                  type="datetime-local"
+                                  value={editingItemDeadline}
+                                  onChange={(event) => setEditingItemDeadline(event.target.value)}
+                                />
+                              </label>
+                              <label className="login-field" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={editingItemIsPublished}
+                                  onChange={(event) => setEditingItemIsPublished(event.target.checked)}
+                                />
+                                <span>Published</span>
+                              </label>
                               <div className="topic-item-actions">
                                 <button
                                   className="ghost-button"
@@ -5441,6 +5835,21 @@ export default function App() {
                           )}
                         </div>
                       )}
+                      {(["quiz", "practice"].includes(topicItemDrafts[topic.id]?.type || "learning")) && (
+                        <label className="login-field" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                          <span style={{ whiteSpace: "nowrap" }}>Max points</span>
+                          <input
+                            className="class-input"
+                            type="number"
+                            min="0"
+                            style={{ width: "80px" }}
+                            value={(topicItemDrafts[topic.id]?.maxPoints) ?? 0}
+                            onChange={(event) =>
+                              updateTopicDraft(topic.id, { maxPoints: Number(event.target.value) || 0 })
+                            }
+                          />
+                        </label>
+                      )}
                       <button
                         className="ghost-button"
                         type="button"
@@ -5695,7 +6104,12 @@ export default function App() {
                     </div>
                     {typeof quizAttempt.isCorrect === "boolean" && (
                       <p className="progress-meta">
-                        Result: {quizAttempt.isCorrect ? "Correct" : "Incorrect"}
+                        Result: {quizAttempt.isCorrect ? "Correct ✓" : "Incorrect ✗"}
+                        {typeof quizAttempt.score === "number" && quizMeta?.item?.maxPoints > 0 && (
+                          <span style={{ marginLeft: "0.5rem", fontWeight: 600 }}>
+                            ({quizAttempt.score} / {quizMeta.item.maxPoints} pts)
+                          </span>
+                        )}
                       </p>
                     )}
                     {quizAttempt.feedback && (
@@ -5706,6 +6120,119 @@ export default function App() {
               </div>
             )}
           </section>
+        </main>
+        {renderChatBot()}
+      </PageShell>
+    );
+  }
+
+  if (route.page === "dashboard") {
+    return (
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className="student-dashboard">
+          <header className="teacher-topbar">
+            <div>
+              <p className="teacher-eyebrow">Student Workspace</p>
+              <h1>My Dashboard</h1>
+              {activeClass && <p className="class-subtitle">Class: {activeClass.name}</p>}
+            </div>
+            <div className="teacher-actions">
+              <button className="ghost-button" type="button" onClick={() => navigateToClass(activeClassId)}>
+                Back to Class
+              </button>
+              <span className="user-pill">{user.name}</span>
+              <span className="role-pill">{user.role}</span>
+              <button className="ghost-button" type="button" onClick={handleLogout}>
+                Log out
+              </button>
+            </div>
+          </header>
+
+          {myDashboardLoading && <p className="empty-state">Loading dashboard…</p>}
+          {!myDashboardLoading && myDashboard && (
+            <section className="class-detail-panel panel-animate" style={{ display: "flex", flexDirection: "column", gap: "2rem" }}>
+
+              {/* Recent Scores */}
+              <div>
+                <h2 style={{ marginBottom: "0.75rem" }}>Recent Scores</h2>
+                {myDashboard.recentScores.length === 0 ? (
+                  <p className="empty-state">No graded submissions yet.</p>
+                ) : (
+                  <div className="progress-list">
+                    {myDashboard.recentScores.map((s) => (
+                      <div key={s.attemptId} className="progress-item panel-animate">
+                        <div className="progress-item-header">
+                          <span className="progress-item-title">{s.title}</span>
+                          <span className={`topic-type type-${s.type}`}>{s.type}</span>
+                        </div>
+                        <p className="progress-meta">
+                          {s.isCorrect ? "Correct ✓" : "Incorrect ✗"}
+                          {typeof s.score === "number" && (
+                            <span style={{ marginLeft: "0.5rem", fontWeight: 600 }}>
+                              {s.score}{s.maxPoints > 0 ? ` / ${s.maxPoints} pts` : " pts"}
+                            </span>
+                          )}
+                          {s.gradedAt && (
+                            <span style={{ marginLeft: "0.5rem", opacity: 0.6, fontSize: "0.8em" }}>
+                              {new Date(s.gradedAt).toLocaleDateString()}
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Upcoming Deadlines */}
+              <div>
+                <h2 style={{ marginBottom: "0.75rem" }}>Upcoming Deadlines</h2>
+                {myDashboard.upcomingDeadlines.length === 0 ? (
+                  <p className="empty-state">No upcoming deadlines.</p>
+                ) : (
+                  <div className="progress-list">
+                    {myDashboard.upcomingDeadlines.map((d) => (
+                      <div key={d.id} className="progress-item panel-animate">
+                        <div className="progress-item-header">
+                          <span className="progress-item-title">{d.title}</span>
+                          <span className={`topic-type type-${d.type}`}>{d.type}</span>
+                        </div>
+                        <p className="progress-meta">
+                          Due: {new Date(d.deadline).toLocaleDateString()}{" "}
+                          <span style={{ fontWeight: 600, color: d.daysLeft <= 1 ? "#e53e3e" : d.daysLeft <= 3 ? "#d69e2e" : "inherit" }}>
+                            ({d.daysLeft} day{d.daysLeft !== 1 ? "s" : ""} left)
+                          </span>
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Updates Feed */}
+              <div>
+                <h2 style={{ marginBottom: "0.75rem" }}>New This Week</h2>
+                {myDashboard.updates.length === 0 ? (
+                  <p className="empty-state">Nothing new in the last 7 days.</p>
+                ) : (
+                  <div className="progress-list">
+                    {myDashboard.updates.map((u) => (
+                      <div key={u.id} className="progress-item panel-animate">
+                        <div className="progress-item-header">
+                          <span className="progress-item-title">{u.title}</span>
+                          <span className={`topic-type type-${u.type}`}>{u.type}</span>
+                        </div>
+                        <p className="progress-meta">
+                          Added {new Date(u.createdAt).toLocaleDateString()}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+            </section>
+          )}
         </main>
         {renderChatBot()}
       </PageShell>
@@ -5766,7 +6293,7 @@ export default function App() {
                   <div key={item.lessonId} className="progress-row panel-animate">
                     <div>
                       <p className="progress-title">{item.heading}</p>
-                      <p className="progress-meta">{item.unit} · {item.duration}</p>
+                      <p className="progress-meta">{item.unit}</p>
                     </div>
                     <div className={`progress-status status-${item.status}`}>
                       {item.status.replace("_", " ")}
@@ -5861,6 +6388,9 @@ export default function App() {
             <div className="quiz-grade-panel">
               <p className="progress-meta">
                 Current status: {selectedQuizAttempt.gradingStatus.replace("_", " ")}
+                {typeof selectedQuizAttempt.score === "number" && (
+                  <span style={{ marginLeft: "0.5rem" }}>· Score: {selectedQuizAttempt.score}</span>
+                )}
               </p>
               <textarea
                 className="lesson-textarea"
@@ -5870,6 +6400,19 @@ export default function App() {
                 placeholder="Optional feedback for student"
                 disabled={quizGrading}
               />
+              <label className="login-field" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                <span style={{ whiteSpace: "nowrap" }}>Override score</span>
+                <input
+                  className="class-input"
+                  type="number"
+                  min="0"
+                  style={{ width: "90px" }}
+                  value={quizGradeScore}
+                  onChange={(event) => setQuizGradeScore(event.target.value)}
+                  placeholder="pts"
+                  disabled={quizGrading}
+                />
+              </label>
               <div className="topic-item-actions">
                 <button
                   className="ghost-button"
@@ -5891,6 +6434,149 @@ export default function App() {
             </div>
           </section>
         )}
+        </main>
+        {renderChatBot()}
+      </PageShell>
+    );
+  }
+
+  if (route.page === "item-response") {
+    const item = itemResponseData;
+    const isCode = item?.type === "practice";
+    const studentName = studentStatsData?.student?.name || "Student";
+    return (
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className="teacher-dashboard">
+          <header className="teacher-topbar">
+            <div>
+              <p className="teacher-eyebrow">
+                {item ? `${item.type}${item.quizSubtype ? ` · ${item.quizSubtype}` : ""}` : "Response"}
+              </p>
+              <h1>{item?.title || "Student Response"}</h1>
+              {item?.topicTitle && <p className="class-subtitle">Topic: {item.topicTitle}</p>}
+            </div>
+            <div className="teacher-actions">
+              <button className="ghost-button" type="button" onClick={() => navigateToStudentStats(activeClassId, route.studentId)}>
+                ← Back to {studentName}
+              </button>
+              <span className="user-pill">{user.name}</span>
+              <span className="role-pill">{user.role}</span>
+              <button className="ghost-button" type="button" onClick={handleLogout}>Log out</button>
+            </div>
+          </header>
+
+          {item ? (
+            <section className="class-stats-section panel-animate">
+              {/* Meta row */}
+              <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap", marginBottom: "1.5rem" }}>
+                <div>
+                  <p className="stats-meta" style={{ marginBottom: "0.2rem" }}>Status</p>
+                  <span className={`sd-status-pill sd-${item.status}`}>
+                    {item.status === "attempted" || item.status === "correct" || item.status === "incorrect" ? "Attempted"
+                      : item.status === "pending" ? "Pending"
+                      : "Not attempted"}
+                  </span>
+                </div>
+                {item.attempts > 0 && (
+                  <div>
+                    <p className="stats-meta" style={{ marginBottom: "0.2rem" }}>Attempts</p>
+                    <p style={{ margin: 0, fontWeight: 600 }}>{item.attempts}</p>
+                  </div>
+                )}
+                {item.submittedAt && (
+                  <div>
+                    <p className="stats-meta" style={{ marginBottom: "0.2rem" }}>Submitted</p>
+                    <p style={{ margin: 0, fontWeight: 600 }}>{new Date(item.submittedAt).toLocaleString()}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Response */}
+              <div style={{ marginBottom: "1.5rem" }}>
+                <p className="stats-meta" style={{ marginBottom: "0.5rem" }}>Response</p>
+                {isCode ? (
+                  <pre style={{ background: "var(--surface-code, #1e1e1e)", color: "#d4d4d4", borderRadius: "8px", padding: "1rem 1.25rem", overflowX: "auto", fontSize: "0.88rem", lineHeight: 1.6, margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    <code>{item.responseText}</code>
+                  </pre>
+                ) : (
+                  <div style={{ background: "var(--surface-2)", borderRadius: "8px", padding: "0.9rem 1.1rem" }}>
+                    <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{item.responseText}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Feedback */}
+              {item.feedback && (
+                <div>
+                  <p className="stats-meta" style={{ marginBottom: "0.5rem" }}>Feedback</p>
+                  <div style={{ background: "var(--accent-soft, #eef2ff)", borderRadius: "8px", padding: "0.9rem 1.1rem" }}>
+                    <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{item.feedback}</p>
+                  </div>
+                </div>
+              )}
+            </section>
+          ) : (
+            <p className="empty-state">No response data available.</p>
+          )}
+        </main>
+        {renderChatBot()}
+      </PageShell>
+    );
+  }
+
+  if (route.page === "ai-log") {
+    const interactions = (studentAILog || []).filter((ix) => {
+      const key = ix.itemId?._id || "general";
+      return key === route.itemKey;
+    });
+    return (
+      <PageShell className={`page-shell ${pageTransition}`}>
+        <main className="teacher-dashboard">
+          <header className="teacher-topbar">
+            <div>
+              <p className="teacher-eyebrow">
+                {route.itemType ? route.itemType.charAt(0).toUpperCase() + route.itemType.slice(1) : "AI Chat Log"}
+              </p>
+              <h1>{route.itemLabel || "Chat Log"}</h1>
+              {activeClass && <p className="class-subtitle">Class: {activeClass.name}</p>}
+            </div>
+            <div className="teacher-actions">
+              <button className="ghost-button" type="button" onClick={() => navigateToStudentStats(activeClassId, route.studentId)}>
+                ← Back to Student
+              </button>
+              <span className="user-pill">{user.name}</span>
+              <span className="role-pill">{user.role}</span>
+              <button className="ghost-button" type="button" onClick={handleLogout}>Log out</button>
+            </div>
+          </header>
+
+          <section className="class-stats-section panel-animate">
+            {studentAILogLoading && <p className="empty-state">Loading…</p>}
+            {!studentAILogLoading && interactions.length === 0 && (
+              <p className="empty-state">No interactions found.</p>
+            )}
+            {!studentAILogLoading && interactions.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+                {interactions.map((ix, idx) => (
+                  <div key={ix._id || idx} style={{ borderBottom: "1px solid var(--border)", paddingBottom: "1.25rem" }}>
+                    <p className="stats-meta" style={{ marginBottom: "0.6rem" }}>
+                      {new Date(ix.createdAt).toLocaleString()}
+                    </p>
+                    <div style={{ background: "var(--surface-2)", borderRadius: "8px", padding: "0.75rem 1rem", marginBottom: "0.5rem" }}>
+                      <span style={{ display: "block", fontSize: "0.75rem", fontWeight: 700, marginBottom: "0.35rem", opacity: 0.6, textTransform: "uppercase", letterSpacing: "0.05em" }}>Student</span>
+                      <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{ix.userMessage || <em style={{ opacity: 0.5 }}>—</em>}</p>
+                    </div>
+                    {ix.aiResponse && (
+                      <div style={{ background: "var(--accent-soft, #eef2ff)", borderRadius: "8px", padding: "0.75rem 1rem" }}>
+                        <span style={{ display: "block", fontSize: "0.75rem", fontWeight: 700, marginBottom: "0.35rem", opacity: 0.6, textTransform: "uppercase", letterSpacing: "0.05em" }}>AI</span>
+                        <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{ix.aiResponse}</p>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
         </main>
         {renderChatBot()}
       </PageShell>
@@ -5954,7 +6640,6 @@ export default function App() {
                         <th>Type</th>
                         <th>Status</th>
                         <th>Attempts</th>
-                        <th>Response</th>
                         <th>Feedback</th>
                         <th>Submitted</th>
                       </tr>
@@ -5962,23 +6647,24 @@ export default function App() {
                     <tbody>
                       {sd.items.map((item) => (
                         <tr key={item.id}>
-                          <td className="stats-student-name">{item.title}</td>
+                          <td
+                            className={`stats-student-name${item.responseText ? " stats-student-link" : ""}`}
+                            onClick={item.responseText ? () => navigateToItemResponse(activeClassId, route.studentId, item) : undefined}
+                            title={item.responseText ? "View response" : undefined}
+                          >
+                            {item.title}
+                          </td>
                           <td className="stats-meta">{item.topicTitle}</td>
                           <td><span className={`topic-type type-${item.type}`}>{item.type}</span></td>
                           <td>
                             <span className={`sd-status-pill sd-${item.status}`}>
-                              {item.status === "correct" ? "✓ Correct"
-                                : item.status === "incorrect" ? "✗ Incorrect"
-                                : item.status === "pending" ? "… Pending"
-                                : "— Not attempted"}
+                              {item.status === "attempted" ? "Attempted"
+                                : item.status === "correct" || item.status === "incorrect" ? "Attempted"
+                                : item.status === "pending" ? "Pending"
+                                : "Not attempted"}
                             </span>
                           </td>
                           <td>{item.attempts || "—"}</td>
-                          <td className="sd-response-cell">
-                            {item.responseText
-                              ? <span className="sd-response-text" title={item.responseText}>{item.responseText.slice(0, 60)}{item.responseText.length > 60 ? "…" : ""}</span>
-                              : <span className="stats-meta">—</span>}
-                          </td>
                           <td className="stats-meta">{item.feedback || "—"}</td>
                           <td className="stats-meta">
                             {item.submittedAt ? new Date(item.submittedAt).toLocaleDateString() : "—"}
@@ -5995,8 +6681,7 @@ export default function App() {
                 <div className="stats-table-section">
                   <h3>Gradebook</h3>
                   <p className="stats-meta">
-                    <span className="gb-legend-cell gb-correct" /> Correct &nbsp;
-                    <span className="gb-legend-cell gb-incorrect" /> Incorrect &nbsp;
+                    <span className="gb-legend-cell gb-correct" /> Attempted &nbsp;
                     <span className="gb-legend-cell gb-pending" /> Pending &nbsp;
                     <span className="gb-legend-cell gb-none" /> Not attempted
                   </p>
@@ -6016,10 +6701,9 @@ export default function App() {
                             <td className="stats-student-name">{item.title}</td>
                             <td className="stats-meta">{item.topicTitle}</td>
                             <td><span className={`topic-type type-${item.type}`}>{item.type}</span></td>
-                            <td className={`gb-cell gb-${item.status}`}>
-                              {item.status === "correct" ? "✓ Correct"
-                                : item.status === "incorrect" ? "✗ Incorrect"
-                                : item.status === "pending" ? "… Pending"
+                            <td className={`gb-cell gb-${item.status === "attempted" || item.status === "correct" || item.status === "incorrect" ? "correct" : item.status}`}>
+                              {item.status === "attempted" || item.status === "correct" || item.status === "incorrect" ? "Attempted"
+                                : item.status === "pending" ? "Pending"
                                 : "—"}
                             </td>
                           </tr>
@@ -6032,6 +6716,45 @@ export default function App() {
 
             </section>
           )}
+
+          {/* AI Chat Log — grouped by item */}
+          <section className="class-stats-section panel-animate" style={{ marginTop: "1.5rem" }}>
+            <h3 style={{ marginBottom: "0.75rem" }}>AI Chat Log</h3>
+            {studentAILogLoading && <p className="empty-state">Loading…</p>}
+            {!studentAILogLoading && studentAILog !== null && studentAILog.length === 0 && (
+              <p className="empty-state">No AI interactions recorded for this student in this class.</p>
+            )}
+            {!studentAILogLoading && studentAILog && studentAILog.length > 0 && (() => {
+              const groups = new Map();
+              for (const ix of studentAILog) {
+                const key = ix.itemId?._id || "general";
+                if (!groups.has(key)) {
+                  groups.set(key, { label: ix.itemId?.title || "General Chat", type: ix.itemId?.type || null, count: 0 });
+                }
+                groups.get(key).count++;
+              }
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  {[...groups.entries()].map(([key, group]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      className="ghost-button"
+                      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0.75rem 1rem", border: "1px solid var(--border)", borderRadius: "8px", textAlign: "left", width: "100%" }}
+                      onClick={() => navigateToAILog(activeClassId, route.studentId, key, group.label, group.type)}
+                    >
+                      <span style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                        {group.type && <span className={`topic-type type-${group.type}`}>{group.type}</span>}
+                        <span style={{ fontWeight: 600 }}>{group.label}</span>
+                      </span>
+                      <span className="stats-meta">{group.count} message{group.count !== 1 ? "s" : ""} →</span>
+                    </button>
+                  ))}
+                </div>
+              );
+            })()}
+          </section>
+
         </main>
         {renderChatBot()}
       </PageShell>
@@ -6136,39 +6859,23 @@ export default function App() {
                   value={lesson.heading}
                   onChange={(event) => updateActiveLesson({ heading: event.target.value })}
                 />
-                <input
-                  className="lesson-input lesson-duration-input"
-                  value={lesson.duration}
-                  onChange={(event) => updateActiveLesson({ duration: event.target.value })}
-                />
               </>
             ) : (
               <>
                 <p className="lesson-eyebrow">{lesson.unit}</p>
                 <h2>{lesson.heading}</h2>
-                <span className="lesson-duration">{lesson.duration}</span>
               </>
             )}
           </div>
           {isTeacherView ? (
             <>
-              <div className="teacher-json">
-                <div className="teacher-json-header">
-                  <p>Lesson JSON</p>
-                  <div className="teacher-json-actions">
-                    <button type="button" onClick={handleSaveJson}>
-                      Save JSON
-                    </button>
-                    <button type="button" onClick={handleLoadJson}>
-                      Load JSON
-                    </button>
-                  </div>
-                </div>
+              <label className="lesson-field">
+                Instructions
                 <textarea
-                  value={lessonJson}
-                  onChange={(event) => setLessonJson(event.target.value)}
+                  value={lesson.instructions}
+                  onChange={(event) => updateActiveLesson({ instructions: event.target.value })}
                 />
-              </div>
+              </label>
               {route.page === "practice" ? (
                 <>
                   <label className="lesson-field">Lesson Content</label>
@@ -6217,13 +6924,6 @@ export default function App() {
                   />
                 </label>
               )}
-              <label className="lesson-field">
-                Instructions
-                <textarea
-                  value={lesson.instructions}
-                  onChange={(event) => updateActiveLesson({ instructions: event.target.value })}
-                />
-              </label>
               <label className="lesson-field">
                 Code starter
                 <textarea
@@ -6323,11 +7023,20 @@ export default function App() {
                   </div>
                 </>
               )}
+              <div className="lesson-save-row">
+                <button className="primary-button" type="button" onClick={handleSaveJson}>
+                  Save
+                </button>
+              </div>
             </>
           ) : (
             <>
               <div className="lesson-body">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{lesson.body || ""}</ReactMarkdown>
+              </div>
+              <div className="lesson-task">
+                <p className="task-title">Instructions</p>
+                <p>{lesson.instructions}</p>
               </div>
               <div className="lesson-callout">
                 <p>Hints</p>
@@ -6336,10 +7045,6 @@ export default function App() {
                     <li key={hint}>{hint}</li>
                   ))}
                 </ul>
-              </div>
-              <div className="lesson-task">
-                <p className="task-title">Instructions</p>
-                <p>{lesson.instructions}</p>
               </div>
             </>
           )}
@@ -6393,16 +7098,16 @@ export default function App() {
           </div>
           <div className="output-shell">
             <pre id="output" className="output-body" />
+            {(errorExplaining || errorExplanation) && (
+              <div className="error-explain-box">
+                <span className="error-explain-label">What does this mean?</span>
+                {errorExplaining
+                  ? <span className="error-explain-loading">Figuring it out…</span>
+                  : <span className="error-explain-text">{errorExplanation}</span>
+                }
+              </div>
+            )}
           </div>
-          {(errorExplaining || errorExplanation) && (
-            <div className="error-explain-box">
-              <span className="error-explain-label">What does this mean?</span>
-              {errorExplaining
-                ? <span className="error-explain-loading">Figuring it out…</span>
-                : <span className="error-explain-text">{errorExplanation}</span>
-              }
-            </div>
-          )}
           {testResults && (
             <div className="test-results-panel">
               <div className="test-results-header">
