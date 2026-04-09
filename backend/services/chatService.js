@@ -565,7 +565,7 @@ export async function gradeShortAnswer({ question, expectedAnswer, studentRespon
           "Be very lenient with phrasing and wording — focus only on whether the student shows understanding of the core concept, not perfect terminology.",
           "Feedback must be warm, positive, and age-appropriate — never discouraging. Always mention something they got right before noting what to improve.",
           "Respond ONLY with a JSON object, no other text:",
-          '{"isCorrect": true/false, "score": 0.0-1.0, "feedback": "Brief, encouraging feedback in simple language a middle schooler understands"}',
+          '{"isCorrect": true/false, "score": 0.0-1.0, "feedback": "Brief, encouraging feedback in simple language a middle schooler understands", "reasoning": "2-sentence teacher-facing explanation of exactly why this score was given — what the student got right or wrong compared to the expected answer"}',
           "score should be 1.0 for fully correct, 0.5 for partially correct, 0.0 for incorrect.",
         ].join("\n"),
       },
@@ -587,8 +587,9 @@ export async function gradeShortAnswer({ question, expectedAnswer, studentRespon
       isCorrect: !!result.isCorrect,
       score: typeof result.score === "number" ? Math.min(1, Math.max(0, result.score)) : (result.isCorrect ? 1 : 0),
       feedback: result.feedback || "",
+      reasoning: result.reasoning || "",
     };
   } catch {
-    return { isCorrect: false, score: 0, feedback: "Auto-grading failed. Awaiting teacher review." };
+    return { isCorrect: false, score: 0, feedback: "Auto-grading failed. Awaiting teacher review.", reasoning: "" };
   }
 }

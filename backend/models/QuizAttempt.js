@@ -32,6 +32,7 @@ const quizAttemptSchema = new mongoose.Schema(
     isCorrect: { type: Boolean, default: null },
     score: { type: Number, default: null },
     feedback: { type: String, default: "", trim: true },
+    reasoning: { type: String, default: "", trim: true },
     attempts: { type: Number, default: 0 },
     submittedAt: { type: Date, default: null },
     gradedAt: { type: Date, default: null },

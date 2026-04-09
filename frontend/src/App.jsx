@@ -490,6 +490,33 @@ const NB_BLOCK_TYPES = [
   { type: "callout", label: "Callout" },
 ];
 
+// Shared block editor for learning item body (notion-style)
+function LearningBodyEditor({ body, onChange }) {
+  const [cells, setCells] = useState(() => parseBodyToCells(body || ""));
+  function handleCellsChange(nextCells) {
+    setCells(nextCells);
+    const { body: newBody } = serializeCellsToBody(nextCells);
+    onChange(newBody);
+  }
+  return <NotebookEditor cells={cells} onChange={handleCellsChange} withHints={false} />;
+}
+
+function PlanLearningEditor({ item, onUpdate }) {
+  return (
+    <div className="plan-edit-fields">
+      <label className="plan-edit-label">Body / Explanation</label>
+      <LearningBodyEditor body={item.body || ""} onChange={(body) => onUpdate({ body })} />
+      <label className="plan-edit-label">Instructions (optional)</label>
+      <textarea
+        className="plan-edit-textarea"
+        rows={2}
+        value={item.instructions || ""}
+        onChange={(e) => onUpdate({ instructions: e.target.value })}
+      />
+    </div>
+  );
+}
+
 function NotebookEditor({ cells, onChange, withHints = false }) {
   function addCell(type) { onChange([...cells, { id: genCellId(), type, content: "" }]); }
   function updateCell(id, content) { onChange(cells.map((c) => (c.id === id ? { ...c, content } : c))); }
@@ -834,6 +861,36 @@ function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE,
   );
 }
 
+function EmptyState({ icon, title, body }) {
+  return (
+    <div className="empty-state-card">
+      {icon && <div className="empty-state-icon" aria-hidden="true">{icon}</div>}
+      <p className="empty-state-title">{title}</p>
+      {body && <p className="empty-state-body">{body}</p>}
+    </div>
+  );
+}
+
+function SkeletonCards({ count = 3 }) {
+  return (
+    <div className="skeleton-wrap">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="skeleton skeleton-card" />
+      ))}
+    </div>
+  );
+}
+
+function SkeletonRows({ count = 5 }) {
+  return (
+    <div className="skeleton-wrap">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="skeleton skeleton-row" />
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [authMode, setAuthMode] = useState("login");
@@ -844,6 +901,7 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
   const [viewRole, setViewRole] = useState("student");
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [route, setRoute] = useState(() => parseRoute());
 
   const [lessons, setLessons] = useState([]);
@@ -916,6 +974,7 @@ export default function App() {
   const [quizAttempt, setQuizAttempt] = useState(null);
   const [quizSubmitting, setQuizSubmitting] = useState(false);
   const [practiceSubmitted, setPracticeSubmitted] = useState(false);
+  const [workspaceTab, setWorkspaceTab] = useState("lesson"); // "lesson" | "editor" | "console"
   const [chatOpen, setChatOpen] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
   const [chatAnimDir, setChatAnimDir] = useState(null); // "expanding" | "collapsing" | "fadein" | null
@@ -930,6 +989,7 @@ export default function App() {
   const [copiedMsgIdx, setCopiedMsgIdx] = useState(null);
   const [importMcq, setImportMcq] = useState(null);
   const [importMcqTopicId, setImportMcqTopicId] = useState("");
+  const [confirmDialog, setConfirmDialog] = useState(null); // { message, onConfirm, danger }
   const [importMcqTitle, setImportMcqTitle] = useState("");
   const [importMcqSaving, setImportMcqSaving] = useState(false);
   const [importMcqError, setImportMcqError] = useState("");
@@ -2036,26 +2096,31 @@ export default function App() {
 
   async function handleDeleteClass() {
     if (!activeClassId) return;
-    if (!window.confirm("Delete this class and all its lessons?")) return;
-    setClassError("");
-    setClassNotice("");
-    try {
-      const res = await fetch(`${API_BASE}/classes/${activeClassId}`, {
-        method: "DELETE",
-        headers: { ...authHeaders() },
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        setClassError(data?.error?.message || "Unable to delete class.");
-        return;
-      }
-      setClasses((prev) => prev.filter((item) => item.id !== activeClassId));
-      setLessons([]);
-      setActiveLessonId(null);
-      navigateToClasses();
-    } catch {
-      setClassError("Class server not reachable.");
-    }
+    setConfirmDialog({
+      message: "Delete this class and all its lessons? This cannot be undone.",
+      danger: true,
+      onConfirm: async () => {
+        setClassError("");
+        setClassNotice("");
+        try {
+          const res = await fetch(`${API_BASE}/classes/${activeClassId}`, {
+            method: "DELETE",
+            headers: { ...authHeaders() },
+          });
+          if (!res.ok) {
+            const data = await res.json();
+            setClassError(data?.error?.message || "Unable to delete class.");
+            return;
+          }
+          setClasses((prev) => prev.filter((item) => item.id !== activeClassId));
+          setLessons([]);
+          setActiveLessonId(null);
+          navigateToClasses();
+        } catch {
+          setClassError("Class server not reachable.");
+        }
+      },
+    });
   }
 
   function handleRefreshStudents() {
@@ -2220,25 +2285,29 @@ export default function App() {
 
   async function deleteTopic(topicId) {
     if (!activeClassId || !topicId) return;
-    const warn =
-      classStudents.length > 0
-        ? "Students are enrolled. Deleting this topic will remove it for all students. Continue?"
-        : "Delete this topic?";
-    if (!window.confirm(warn)) return;
-    try {
-      const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics/${topicId}`, {
-        method: "DELETE",
-        headers: { ...authHeaders() },
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        setTopicError(data?.error?.message || "Unable to delete topic.");
-        return;
-      }
-      setTopics((prev) => prev.filter((topic) => topic.id !== topicId));
-    } catch {
-      setTopicError("Topic server not reachable.");
-    }
+    const msg = classStudents.length > 0
+      ? "Students are enrolled. Deleting this topic will remove it for all students."
+      : "Delete this topic? This cannot be undone.";
+    setConfirmDialog({
+      message: msg,
+      danger: true,
+      onConfirm: async () => {
+        try {
+          const res = await fetch(`${API_BASE}/classes/${activeClassId}/topics/${topicId}`, {
+            method: "DELETE",
+            headers: { ...authHeaders() },
+          });
+          if (!res.ok) {
+            const data = await res.json();
+            setTopicError(data?.error?.message || "Unable to delete topic.");
+            return;
+          }
+          setTopics((prev) => prev.filter((topic) => topic.id !== topicId));
+        } catch {
+          setTopicError("Topic server not reachable.");
+        }
+      },
+    });
   }
 
   function beginEditItem(item) {
@@ -2420,34 +2489,35 @@ export default function App() {
 
   async function deleteItem(topicId, itemId) {
     if (!activeClassId || !topicId || !itemId) return;
-    const warn =
-      classStudents.length > 0
-        ? "Students are enrolled. Deleting this item will remove it for all students. Continue?"
-        : "Delete this item?";
-    if (!window.confirm(warn)) return;
-    try {
-      const res = await fetch(
-        `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items/${itemId}`,
-        {
-          method: "DELETE",
-          headers: { ...authHeaders() },
+    const msg = classStudents.length > 0
+      ? "Students are enrolled. Deleting this item will remove it for all students."
+      : "Delete this item? This cannot be undone.";
+    setConfirmDialog({
+      message: msg,
+      danger: true,
+      onConfirm: async () => {
+        try {
+          const res = await fetch(
+            `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items/${itemId}`,
+            { method: "DELETE", headers: { ...authHeaders() } }
+          );
+          if (!res.ok) {
+            const data = await res.json();
+            setTopicError(data?.error?.message || "Unable to delete item.");
+            return;
+          }
+          setTopics((prev) =>
+            prev.map((topic) =>
+              topic.id === topicId
+                ? { ...topic, items: (topic.items || []).filter((item) => item.id !== itemId) }
+                : topic
+            )
+          );
+        } catch {
+          setTopicError("Item server not reachable.");
         }
-      );
-      if (!res.ok) {
-        const data = await res.json();
-        setTopicError(data?.error?.message || "Unable to delete item.");
-        return;
-      }
-      setTopics((prev) =>
-        prev.map((topic) =>
-          topic.id === topicId
-            ? { ...topic, items: (topic.items || []).filter((item) => item.id !== itemId) }
-            : topic
-        )
-      );
-    } catch {
-      setTopicError("Item server not reachable.");
-    }
+      },
+    });
   }
 
   function handleSelectStudent(student) {
@@ -3041,6 +3111,29 @@ export default function App() {
     } finally {
       setImportMcqSaving(false);
     }
+  }
+
+  function renderConfirmDialog() {
+    if (!confirmDialog) return null;
+    return (
+      <div className="modal-overlay" onClick={() => setConfirmDialog(null)}>
+        <div className="modal-content confirm-dialog" onClick={(e) => e.stopPropagation()}>
+          <p className="confirm-dialog-message">{confirmDialog.message}</p>
+          <div className="confirm-dialog-actions">
+            <button className="ghost-button" type="button" onClick={() => setConfirmDialog(null)}>
+              Cancel
+            </button>
+            <button
+              className={`primary-button${confirmDialog.danger ? " danger-button" : ""}`}
+              type="button"
+              onClick={() => { confirmDialog.onConfirm(); setConfirmDialog(null); }}
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   function renderImportMcqModal() {
@@ -3732,56 +3825,169 @@ export default function App() {
 
     const selectedCount = importPlanSelected.size;
 
-    const renderItemPreview = (item) => {
+    const updatePlanItem = (ti, ii, patch) => {
+      setImportPlan((prev) => {
+        const topics = prev.topics.map((t, tIdx) =>
+          tIdx !== ti ? t : {
+            ...t,
+            items: t.items.map((itm, iIdx) =>
+              iIdx !== ii ? itm : { ...itm, ...patch }
+            ),
+          }
+        );
+        return { ...prev, topics };
+      });
+    };
+
+    const renderItemEdit = (item, ti, ii) => {
       if (item.type === "learning") {
         return (
-          <div className="plan-learning-preview">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-              {item.body || ""}
-            </ReactMarkdown>
-          </div>
+          <PlanLearningEditor
+            item={item}
+            onUpdate={(patch) => updatePlanItem(ti, ii, patch)}
+          />
         );
       }
       if (item.type === "quiz") {
-        const correctIdx = "ABCDEFGHIJ".indexOf((item.quizAnswer || "").toUpperCase());
         return (
-          <div style={{ marginTop: "0.4rem" }}>
-            <div className="plan-learning-preview" style={{ marginBottom: "0.4rem" }}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                {item.quizQuestion || ""}
-              </ReactMarkdown>
-            </div>
+          <div className="plan-edit-fields">
+            <label className="plan-edit-label">Question</label>
+            <textarea
+              className="plan-edit-textarea"
+              rows={4}
+              value={item.quizQuestion || ""}
+              onChange={(e) => updatePlanItem(ti, ii, { quizQuestion: e.target.value })}
+            />
             {item.quizSubtype === "mcq" && Array.isArray(item.quizOptions) && (
-              <ul style={{ margin: 0, paddingLeft: "1.2rem", fontSize: "0.82rem" }}>
+              <div>
+                <label className="plan-edit-label">Options — select correct answer</label>
                 {item.quizOptions.map((opt, oi) => {
+                  const letter = String.fromCharCode(65 + oi);
+                  const correctIdx = "ABCDEFGHIJ".indexOf((item.quizAnswer || "").toUpperCase());
                   const isCorrect = oi === correctIdx || opt === item.quizAnswer;
                   return (
-                    <li key={oi} style={{ color: isCorrect ? "var(--accent)" : "var(--text-secondary)", fontWeight: isCorrect ? 600 : 400, marginBottom: "0.1rem" }}>
-                      <strong style={{ marginRight: 4 }}>{String.fromCharCode(65 + oi)}.</strong>{opt}
-                    </li>
+                    <div key={oi} className="plan-edit-option-row">
+                      <input
+                        type="radio"
+                        name={`quiz-answer-${ti}-${ii}`}
+                        checked={isCorrect}
+                        onChange={() => updatePlanItem(ti, ii, { quizAnswer: letter })}
+                        style={{ cursor: "pointer", flexShrink: 0 }}
+                      />
+                      <span className="plan-edit-option-letter">{letter}</span>
+                      <input
+                        className="plan-edit-option-input"
+                        value={opt}
+                        onChange={(e) => {
+                          const opts = [...item.quizOptions];
+                          opts[oi] = e.target.value;
+                          updatePlanItem(ti, ii, { quizOptions: opts });
+                        }}
+                      />
+                    </div>
                   );
                 })}
-              </ul>
-            )}
-            {item.explanation && (
-              <div className="mcq-explanation-callout" style={{ marginTop: "0.5rem", fontSize: "0.78rem" }}>
-                <strong>Explanation:</strong> {item.explanation}
               </div>
             )}
+            <label className="plan-edit-label">Explanation (optional)</label>
+            <textarea
+              className="plan-edit-textarea"
+              rows={2}
+              value={item.explanation || ""}
+              onChange={(e) => updatePlanItem(ti, ii, { explanation: e.target.value })}
+            />
           </div>
         );
       }
       if (item.type === "practice") {
+        const testCases = item.testCases || [];
         return (
-          <div style={{ marginTop: "0.4rem", fontSize: "0.82rem" }}>
-            {item.instructions && <p style={{ margin: "0 0 0.25rem", fontStyle: "italic" }}>{item.instructions}</p>}
-            {item.codeStarter && (
-              <div className="mcq-code-window">
-                <div className="mcq-code-window-bar">
-                  <span className="mcq-code-window-lang">python</span>
-                  <div className="mcq-code-window-dots"><span /><span /><span /></div>
-                </div>
-                <pre style={{ margin: 0, background: "#1e1e1e", color: "#d4d4d4", padding: "8px 12px", fontSize: "0.78rem", overflowX: "auto" }}><code>{item.codeStarter}</code></pre>
+          <div className="plan-edit-fields">
+            <label className="plan-edit-label">Instructions</label>
+            <textarea
+              className="plan-edit-textarea"
+              rows={3}
+              value={item.instructions || ""}
+              onChange={(e) => updatePlanItem(ti, ii, { instructions: e.target.value })}
+            />
+            <label className="plan-edit-label">Starter Code</label>
+            <textarea
+              className="plan-edit-code"
+              rows={6}
+              spellCheck={false}
+              value={item.codeStarter || ""}
+              onChange={(e) => updatePlanItem(ti, ii, { codeStarter: e.target.value })}
+            />
+            <label className="plan-edit-label">Model Answer</label>
+            <textarea
+              className="plan-edit-code"
+              rows={6}
+              spellCheck={false}
+              value={item.modelAnswer || ""}
+              onChange={(e) => updatePlanItem(ti, ii, { modelAnswer: e.target.value })}
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
+              <input
+                type="checkbox"
+                id={`plan-testmode-${ti}-${ii}`}
+                checked={!!item.testMode}
+                onChange={(e) => updatePlanItem(ti, ii, { testMode: e.target.checked })}
+                style={{ width: "auto", cursor: "pointer" }}
+              />
+              <label htmlFor={`plan-testmode-${ti}-${ii}`} style={{ margin: 0, textTransform: "none", letterSpacing: 0, fontSize: "0.82rem", fontWeight: 600, cursor: "pointer" }}>
+                LeetCode-style test cases
+              </label>
+            </div>
+            {item.testMode && (
+              <div className="plan-edit-fields" style={{ marginTop: "0.25rem" }}>
+                {testCases.map((tc, tci) => (
+                  <div key={tci} className="test-case-row" style={{ marginBottom: "0.5rem" }}>
+                    <input
+                      className="test-case-label-input"
+                      placeholder={`Test ${tci + 1} label`}
+                      value={tc.label || ""}
+                      onChange={(e) => {
+                        const next = testCases.map((t, i) => i === tci ? { ...t, label: e.target.value } : t);
+                        updatePlanItem(ti, ii, { testCases: next });
+                      }}
+                    />
+                    <div className="test-case-fields">
+                      <textarea
+                        className="test-case-input"
+                        placeholder="Input (one value per line)"
+                        rows={2}
+                        value={tc.input || ""}
+                        onChange={(e) => {
+                          const next = testCases.map((t, i) => i === tci ? { ...t, input: e.target.value } : t);
+                          updatePlanItem(ti, ii, { testCases: next });
+                        }}
+                      />
+                      <textarea
+                        className="test-case-expected"
+                        placeholder="Expected output"
+                        rows={2}
+                        value={tc.expectedOutput || ""}
+                        onChange={(e) => {
+                          const next = testCases.map((t, i) => i === tci ? { ...t, expectedOutput: e.target.value } : t);
+                          updatePlanItem(ti, ii, { testCases: next });
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        style={{ padding: "4px 8px", fontSize: "0.75rem", color: "var(--danger-text)" }}
+                        onClick={() => updatePlanItem(ti, ii, { testCases: testCases.filter((_, i) => i !== tci) })}
+                      >✕</button>
+                    </div>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="ghost-button test-case-add"
+                  onClick={() => updatePlanItem(ti, ii, { testCases: [...testCases, { label: "", input: "", expectedOutput: "" }] })}
+                >
+                  + Add Test Case
+                </button>
               </div>
             )}
           </div>
@@ -3791,7 +3997,17 @@ export default function App() {
     };
 
     return (
-      <div className="modal-overlay" onClick={() => setImportPlan(null)}>
+      <div className="modal-overlay" onClick={() => {
+        if (importPlanSelected.size > 0) {
+          setConfirmDialog({
+            message: `You have ${importPlanSelected.size} item${importPlanSelected.size !== 1 ? "s" : ""} selected. Close without importing?`,
+            danger: false,
+            onConfirm: () => setImportPlan(null),
+          });
+        } else {
+          setImportPlan(null);
+        }
+      }}>
         <div className="modal-content mcq-modal plan-modal" onClick={(e) => e.stopPropagation()}>
           <div className="mcq-modal-header">
             <div>
@@ -3853,7 +4069,11 @@ export default function App() {
                                 style={{ cursor: "pointer" }}
                               />
                               <span className={`topic-type type-${item.type}`}>{item.type}</span>
-                              <span className="plan-item-title">{item.title || "Untitled"}</span>
+                              <input
+                                className="plan-item-title-input"
+                                value={item.title || ""}
+                                onChange={(e) => updatePlanItem(ti, ii, { title: e.target.value })}
+                              />
                               <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
                                 {item.testMode && <span className="teacher-only-badge">Tests</span>}
                                 <button
@@ -3862,13 +4082,13 @@ export default function App() {
                                   style={{ padding: "2px 8px", fontSize: "0.75rem", whiteSpace: "nowrap" }}
                                   onClick={() => toggleExpand(key)}
                                 >
-                                  {isExpanded ? "▲ Hide" : "▼ Preview"}
+                                  {isExpanded ? "▲ Hide" : "▼ Edit"}
                                 </button>
                               </div>
                             </div>
                             {isExpanded && (
                               <div className="plan-item-preview">
-                                {renderItemPreview(item)}
+                                {renderItemEdit(item, ti, ii)}
                               </div>
                             )}
                           </div>
@@ -3982,21 +4202,20 @@ export default function App() {
                 style={{ padding: "2px 10px", fontSize: "0.75rem" }}
                 onClick={() => setImportLearningBodyEdit((v) => !v)}
               >
-                {importLearningBodyEdit ? "Preview" : "Edit"}
+                {importLearningBodyEdit ? "Edit" : "Preview"}
               </button>
             </div>
             {importLearningBodyEdit ? (
-              <textarea
-                value={importLearning.body}
-                onChange={(e) => setImportLearning({ ...importLearning, body: e.target.value })}
-                rows={10}
-              />
-            ) : (
               <div className="import-learning-body-preview plan-learning-preview">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
                   {importLearning.body || ""}
                 </ReactMarkdown>
               </div>
+            ) : (
+              <LearningBodyEditor
+                body={importLearning.body || ""}
+                onChange={(body) => setImportLearning({ ...importLearning, body })}
+              />
             )}
 
             <label>Instructions (optional)</label>
@@ -4447,8 +4666,83 @@ export default function App() {
                                 className="chat-copy-btn chat-import-btn"
                                 title="Import as Learning Lesson"
                                 onClick={() => {
-                                  collapseChat();
                                   repairAndImport(msg.content, "learning-json", parseLearningFromMessage, (item) => {
+                                    // If teacher is viewing a learning lesson, update it directly
+                                    if (route.page === "learn" && isTeacherView && learningMeta) {
+                                      const topicId = learningMeta.topic?.id;
+                                      const itemId = learningMeta.id;
+                                      const newBody = item.body || "";
+                                      const newInstructions = item.instructions || "";
+                                      const newHints = item.hints || [];
+                                      const newCodeStarter = item.codeStarter || "";
+                                      fetch(
+                                        `${API_BASE}/classes/${activeClassId}/topics/${topicId}/items/${itemId}`,
+                                        {
+                                          method: "PUT",
+                                          headers: { "Content-Type": "application/json", ...authHeaders() },
+                                          body: JSON.stringify({
+                                            title: item.title || learningMeta.title,
+                                            type: "learning",
+                                            practiceBody: newBody,
+                                            practiceInstructions: newInstructions,
+                                            practiceHints: newHints,
+                                            practiceCodeStarter: newCodeStarter,
+                                          }),
+                                        }
+                                      ).then((res) => {
+                                        if (res.ok) {
+                                          setLearningMeta((prev) => ({
+                                            ...prev,
+                                            title: item.title || prev.title,
+                                            practiceBody: newBody,
+                                            practiceInstructions: newInstructions,
+                                            practiceHints: newHints,
+                                            practiceCodeStarter: newCodeStarter,
+                                          }));
+                                          setToast({ type: "success", message: "Lesson updated!" });
+                                        } else {
+                                          setToast({ type: "error", message: "Failed to update lesson." });
+                                        }
+                                      }).catch(() => setToast({ type: "error", message: "Server not reachable." }));
+                                      return;
+                                    }
+                                    // If the plan modal is open, try to update the matching item in-place
+                                    if (importPlan) {
+                                      let matchTi = -1, matchIi = -1;
+                                      importPlan.topics.forEach((topic, ti) => {
+                                        topic.items.forEach((planItem, ii) => {
+                                          if (matchTi === -1 && planItem.type === "learning") {
+                                            const a = (planItem.title || "").toLowerCase();
+                                            const b = (item.title || "").toLowerCase();
+                                            if (a === b || a.includes(b) || b.includes(a)) {
+                                              matchTi = ti; matchIi = ii;
+                                            }
+                                          }
+                                        });
+                                      });
+                                      if (matchTi !== -1) {
+                                        setImportPlan((prev) => ({
+                                          ...prev,
+                                          topics: prev.topics.map((topic, ti) => ({
+                                            ...topic,
+                                            items: topic.items.map((planItem, ii) =>
+                                              ti === matchTi && ii === matchIi
+                                                ? { ...planItem, title: item.title, body: item.body, instructions: item.instructions, hints: item.hints }
+                                                : planItem
+                                            ),
+                                          })),
+                                        }));
+                                        setImportPlanExpanded((prev) => {
+                                          const next = new Set(prev);
+                                          next.add(`${matchTi}-${matchIi}`);
+                                          return next;
+                                        });
+                                        setToast({ type: "success", message: `Updated "${item.title}" in the lesson plan.` });
+                                        return;
+                                      }
+                                    }
+                                    // Fall back: open separate import modal
+                                    collapseChat();
                                     setImportLearning(item);
                                     setImportLearningTopicId(topics[0]?.id || "__new__");
                                     setImportLearningError("");
@@ -4513,6 +4807,7 @@ export default function App() {
           </div>
           </>
         )}
+        {renderConfirmDialog()}
         {renderImportMcqModal()}
         {renderImportSaModal()}
         {renderImportPracticeModal()}
@@ -4770,11 +5065,25 @@ export default function App() {
               <h1>Classes</h1>
             </div>
             <div className="teacher-actions">
-              <span className="user-pill">{user.name}</span>
-              <span className="role-pill">{user.role}</span>
-              <button className="ghost-button" type="button" onClick={handleLogout}>
-                Log out
-              </button>
+              <div className="user-menu-anchor">
+                <button
+                  className="ghost-button user-menu-trigger"
+                  type="button"
+                  onClick={() => setUserMenuOpen((o) => !o)}
+                  aria-expanded={userMenuOpen}
+                  aria-haspopup="menu"
+                >
+                  {user.name} ▾
+                </button>
+                {userMenuOpen && (
+                  <div className="user-menu-dropdown" role="menu" onClick={() => setUserMenuOpen(false)}>
+                    <span className="user-menu-role">{user.role}</span>
+                    <button className="user-menu-item user-menu-item--danger" type="button" role="menuitem" onClick={handleLogout}>
+                      Log out
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
 
@@ -4841,11 +5150,12 @@ export default function App() {
                     <small>Join code: {item.joinCode}</small>
                   </button>
                 ) : (
-                  <div key={item.id} className="class-card panel-animate">
+                  <div key={item.id} className={`class-card panel-animate${pct === 100 && prog?.gradedItems > 0 ? " class-card--done" : ""}`}>
                     <div
                       className="class-card-body"
                       role="button"
                       tabIndex={0}
+                      aria-label={`Open class ${item.name}`}
                       onClick={() => handleSelectClass(item.id)}
                       onKeyDown={(e) => e.key === "Enter" && handleSelectClass(item.id)}
                     >
@@ -4856,7 +5166,11 @@ export default function App() {
                             <div className="class-progress-fill" style={{ width: `${pct}%` }} />
                           </div>
                           <small className="class-progress-label">
-                            {prog.attemptedItems}/{prog.gradedItems} items attempted · {pct}%
+                            {pct === 100 ? (
+                              <span className="class-done-badge">All done ✓</span>
+                            ) : (
+                              <>{prog.attemptedItems}/{prog.gradedItems} items attempted · {pct}%</>
+                            )}
                           </small>
                         </>
                       ) : (
@@ -4880,11 +5194,11 @@ export default function App() {
                 );
               })}
               {!classes.length && (
-                <p className="empty-state">
-                  {isTeacher
-                    ? "Create a class to start adding lessons."
-                    : "Join a class to see lessons."}
-                </p>
+                <EmptyState
+                  icon={isTeacher ? "🏫" : "🎒"}
+                  title={isTeacher ? "No classes yet" : "Not in a class yet"}
+                  body={isTeacher ? "Create your first class to start building lessons." : "Ask your teacher for a join code."}
+                />
               )}
             </div>
           </section>
@@ -4940,11 +5254,35 @@ export default function App() {
                 Delete class
               </button>
             )}
-            <span className="user-pill">{user.name}</span>
-            <span className="role-pill">{user.role}</span>
-            <button className="ghost-button" type="button" onClick={handleLogout}>
-              Log out
-            </button>
+            <div className="user-menu-anchor">
+              <button
+                className="ghost-button user-menu-trigger"
+                type="button"
+                onClick={() => setUserMenuOpen((o) => !o)}
+                aria-expanded={userMenuOpen}
+                aria-haspopup="menu"
+              >
+                {user.name} ▾
+              </button>
+              {userMenuOpen && (
+                <div className="user-menu-dropdown" role="menu" onClick={() => setUserMenuOpen(false)}>
+                  <span className="user-menu-role">{user.role}</span>
+                  {isTeacher && (
+                    <button
+                      className="user-menu-item"
+                      type="button"
+                      role="menuitem"
+                      onClick={() => setViewRole(v => v === "teacher" ? "student" : "teacher")}
+                    >
+                      Switch to {isTeacherView ? "Student" : "Teacher"} view
+                    </button>
+                  )}
+                  <button className="user-menu-item user-menu-item--danger" type="button" role="menuitem" onClick={handleLogout}>
+                    Log out
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
@@ -4969,7 +5307,7 @@ export default function App() {
 
         {isTeacher && classTab === "stats" ? (
           <section className="class-stats-section panel-animate">
-            {classStatsLoading && <p className="empty-state">Loading stats…</p>}
+            {classStatsLoading && <SkeletonRows count={5} />}
             {!classStatsLoading && classStats && (
               <>
                 {/* ── Summary cards ── */}
@@ -5202,7 +5540,7 @@ export default function App() {
             </div>
             {topicError && <p className="auth-error">{topicError}</p>}
             {topics.length === 0 && (
-              <p className="empty-state">No topics yet for this class.</p>
+              <EmptyState icon="📚" title="No topics yet" body="Add your first topic to start building the curriculum." />
             )}
             <div className="topic-grid">
               {topics.map((topic) => (
@@ -5567,7 +5905,10 @@ export default function App() {
                                 {item.type}
                               </span>
                               <div className="topic-item-main">
-                                <span className="topic-item-title">{item.title}</span>
+                                <span className="topic-item-title">
+                                  {item.title}
+                                  {item.isPublished === false && <span className="draft-badge">Draft</span>}
+                                </span>
                                 {item.type === "quiz" && item.quizQuestion && (
                                   <span className="topic-item-meta">
                                     {item.quizSubtype === "mcq" ? "MCQ" : "Short answer"}:{" "}
@@ -5617,7 +5958,7 @@ export default function App() {
                         </div>
                       ))
                     ) : (
-                      <p className="empty-state">No learning, quizzes, or practice yet.</p>
+                      <EmptyState icon="📝" title="No items yet" body="Add a learning lesson, quiz, or coding practice." />
                     )}
                   </div>
                   {isTeacher && (
@@ -5873,7 +6214,7 @@ export default function App() {
                 </button>
               </div>
               {classStudents.length === 0 && (
-                <p className="empty-state">No students enrolled yet.</p>
+                <EmptyState icon="👩‍🎓" title="No students yet" body="Share the join code with your students." />
               )}
               <div className="student-list">
                 {classStudents.map((student) => (
@@ -5925,11 +6266,17 @@ export default function App() {
               <button className="ghost-button" type="button" onClick={navigateToClasses}>
                 Back to Classes
               </button>
-              <span className="user-pill">{user.name}</span>
-              <span className="role-pill">{user.role}</span>
-              <button className="ghost-button" type="button" onClick={handleLogout}>
-                Log out
-              </button>
+              <div className="user-menu-anchor">
+                <button className="ghost-button user-menu-trigger" type="button" onClick={() => setUserMenuOpen((o) => !o)} aria-expanded={userMenuOpen} aria-haspopup="menu">
+                  {user.name} ▾
+                </button>
+                {userMenuOpen && (
+                  <div className="user-menu-dropdown" role="menu" onClick={() => setUserMenuOpen(false)}>
+                    <span className="user-menu-role">{user.role}</span>
+                    <button className="user-menu-item user-menu-item--danger" type="button" role="menuitem" onClick={handleLogout}>Log out</button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
           {navIndex >= 0 && (
@@ -5995,11 +6342,17 @@ export default function App() {
               <button className="ghost-button" type="button" onClick={navigateToClasses}>
                 Back to Classes
               </button>
-              <span className="user-pill">{user.name}</span>
-              <span className="role-pill">{user.role}</span>
-              <button className="ghost-button" type="button" onClick={handleLogout}>
-                Log out
-              </button>
+              <div className="user-menu-anchor">
+                <button className="ghost-button user-menu-trigger" type="button" onClick={() => setUserMenuOpen((o) => !o)} aria-expanded={userMenuOpen} aria-haspopup="menu">
+                  {user.name} ▾
+                </button>
+                {userMenuOpen && (
+                  <div className="user-menu-dropdown" role="menu" onClick={() => setUserMenuOpen(false)}>
+                    <span className="user-menu-role">{user.role}</span>
+                    <button className="user-menu-item user-menu-item--danger" type="button" role="menuitem" onClick={handleLogout}>Log out</button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
           {navIndex >= 0 && (
@@ -6027,7 +6380,7 @@ export default function App() {
           )}
 
           <section className="class-detail-panel panel-animate">
-            {quizLoading && <p className="empty-state">Loading quiz…</p>}
+            {quizLoading && <SkeletonCards count={3} />}
             {quizError && <p className="auth-error">{quizError}</p>}
             {!quizLoading && !quizError && quizMeta && (
               <div className="quiz-layout">
@@ -6140,21 +6493,31 @@ export default function App() {
               <button className="ghost-button" type="button" onClick={() => navigateToClass(activeClassId)}>
                 Back to Class
               </button>
-              <span className="user-pill">{user.name}</span>
-              <span className="role-pill">{user.role}</span>
-              <button className="ghost-button" type="button" onClick={handleLogout}>
-                Log out
-              </button>
+              <div className="user-menu-anchor">
+                <button className="ghost-button user-menu-trigger" type="button" onClick={() => setUserMenuOpen((o) => !o)} aria-expanded={userMenuOpen} aria-haspopup="menu">
+                  {user.name} ▾
+                </button>
+                {userMenuOpen && (
+                  <div className="user-menu-dropdown" role="menu" onClick={() => setUserMenuOpen(false)}>
+                    <span className="user-menu-role">{user.role}</span>
+                    <button className="user-menu-item user-menu-item--danger" type="button" role="menuitem" onClick={handleLogout}>Log out</button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
 
-          {myDashboardLoading && <p className="empty-state">Loading dashboard…</p>}
+          {myDashboardLoading && <SkeletonCards count={4} />}
           {!myDashboardLoading && myDashboard && (
-            <section className="class-detail-panel panel-animate" style={{ display: "flex", flexDirection: "column", gap: "2rem" }}>
+            <section className="class-detail-panel panel-animate">
+              <div className="dashboard-grid">
 
               {/* Recent Scores */}
-              <div>
-                <h2 style={{ marginBottom: "0.75rem" }}>Recent Scores</h2>
+              <div className="dashboard-card">
+                <div className="dashboard-card-header">
+                  <span className="dashboard-card-icon" aria-hidden="true">📊</span>
+                  <h2 className="dashboard-card-title">Recent Scores</h2>
+                </div>
                 {myDashboard.recentScores.length === 0 ? (
                   <p className="empty-state">No graded submissions yet.</p>
                 ) : (
@@ -6185,8 +6548,14 @@ export default function App() {
               </div>
 
               {/* Upcoming Deadlines */}
-              <div>
-                <h2 style={{ marginBottom: "0.75rem" }}>Upcoming Deadlines</h2>
+              <div className="dashboard-card dashboard-card--urgent">
+                <div className="dashboard-card-header">
+                  <span className="dashboard-card-icon" aria-hidden="true">⏰</span>
+                  <h2 className="dashboard-card-title">Upcoming Deadlines</h2>
+                  {myDashboard.upcomingDeadlines.length > 0 && (
+                    <span className="dashboard-badge">{myDashboard.upcomingDeadlines.length}</span>
+                  )}
+                </div>
                 {myDashboard.upcomingDeadlines.length === 0 ? (
                   <p className="empty-state">No upcoming deadlines.</p>
                 ) : (
@@ -6199,7 +6568,7 @@ export default function App() {
                         </div>
                         <p className="progress-meta">
                           Due: {new Date(d.deadline).toLocaleDateString()}{" "}
-                          <span style={{ fontWeight: 600, color: d.daysLeft <= 1 ? "#e53e3e" : d.daysLeft <= 3 ? "#d69e2e" : "inherit" }}>
+                          <span style={{ fontWeight: 600, color: d.daysLeft <= 1 ? "var(--danger-text)" : d.daysLeft <= 3 ? "var(--warning-text)" : "var(--text-primary)" }}>
                             ({d.daysLeft} day{d.daysLeft !== 1 ? "s" : ""} left)
                           </span>
                         </p>
@@ -6210,8 +6579,11 @@ export default function App() {
               </div>
 
               {/* Updates Feed */}
-              <div>
-                <h2 style={{ marginBottom: "0.75rem" }}>New This Week</h2>
+              <div className="dashboard-card">
+                <div className="dashboard-card-header">
+                  <span className="dashboard-card-icon" aria-hidden="true">✨</span>
+                  <h2 className="dashboard-card-title">New This Week</h2>
+                </div>
                 {myDashboard.updates.length === 0 ? (
                   <p className="empty-state">Nothing new in the last 7 days.</p>
                 ) : (
@@ -6231,6 +6603,7 @@ export default function App() {
                 )}
               </div>
 
+              </div>{/* end dashboard-grid */}
             </section>
           )}
         </main>
@@ -6279,9 +6652,7 @@ export default function App() {
 
         <section className="class-detail-panel panel-animate">
           {practiceError && <p className="auth-error">{practiceError}</p>}
-          {studentProgressLoading && (
-            <p className="empty-state">Loading progress…</p>
-          )}
+          {studentProgressLoading && <SkeletonRows count={4} />}
           {studentProgressError && (
             <p className="auth-error">{studentProgressError}</p>
           )}
@@ -6386,50 +6757,61 @@ export default function App() {
               <code>{selectedQuizAttempt.responseText || "No response recorded."}</code>
             </pre>
             <div className="quiz-grade-panel">
-              <p className="progress-meta">
-                Current status: {selectedQuizAttempt.gradingStatus.replace("_", " ")}
+              <div className="quiz-grade-header">
+                <span className={`status-badge status-${selectedQuizAttempt.gradingStatus}`}>
+                  {selectedQuizAttempt.gradingStatus.replace(/_/g, " ")}
+                </span>
                 {typeof selectedQuizAttempt.score === "number" && (
-                  <span style={{ marginLeft: "0.5rem" }}>· Score: {selectedQuizAttempt.score}</span>
+                  <span className="quiz-score-badge">{selectedQuizAttempt.score} pt{selectedQuizAttempt.score !== 1 ? "s" : ""}</span>
                 )}
-              </p>
-              <textarea
-                className="lesson-textarea"
-                rows={4}
-                value={quizGradeFeedback}
-                onChange={(event) => setQuizGradeFeedback(event.target.value)}
-                placeholder="Optional feedback for student"
-                disabled={quizGrading}
-              />
-              <label className="login-field" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
-                <span style={{ whiteSpace: "nowrap" }}>Override score</span>
-                <input
-                  className="class-input"
-                  type="number"
-                  min="0"
-                  style={{ width: "90px" }}
-                  value={quizGradeScore}
-                  onChange={(event) => setQuizGradeScore(event.target.value)}
-                  placeholder="pts"
+              </div>
+              {selectedQuizAttempt.gradingStatus === "auto_graded" && selectedQuizAttempt.reasoning && (
+                <div className="quiz-reasoning-box">
+                  <p className="quiz-reasoning-label">AI Reasoning</p>
+                  <p>{selectedQuizAttempt.reasoning}</p>
+                </div>
+              )}
+              <div className="quiz-override-section">
+                <p className="quiz-override-label">Teacher Override</p>
+                <textarea
+                  className="lesson-textarea"
+                  rows={3}
+                  value={quizGradeFeedback}
+                  onChange={(event) => setQuizGradeFeedback(event.target.value)}
+                  placeholder="Optional feedback for student"
                   disabled={quizGrading}
                 />
-              </label>
-              <div className="topic-item-actions">
-                <button
-                  className="ghost-button"
-                  type="button"
-                  onClick={() => gradeSelectedQuizAttempt(true)}
-                  disabled={quizGrading}
-                >
-                  Mark correct
-                </button>
-                <button
-                  className="ghost-button danger"
-                  type="button"
-                  onClick={() => gradeSelectedQuizAttempt(false)}
-                  disabled={quizGrading}
-                >
-                  Mark incorrect
-                </button>
+                <label className="login-field" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem", marginTop: "0.5rem" }}>
+                  <span style={{ whiteSpace: "nowrap" }}>Override score</span>
+                  <input
+                    className="class-input"
+                    type="number"
+                    min="0"
+                    style={{ width: "90px" }}
+                    value={quizGradeScore}
+                    onChange={(event) => setQuizGradeScore(event.target.value)}
+                    placeholder="pts"
+                    disabled={quizGrading}
+                  />
+                </label>
+                <div className="topic-item-actions" style={{ marginTop: "0.5rem" }}>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => gradeSelectedQuizAttempt(true)}
+                    disabled={quizGrading}
+                  >
+                    ✓ Save as Correct
+                  </button>
+                  <button
+                    className="ghost-button danger"
+                    type="button"
+                    onClick={() => gradeSelectedQuizAttempt(false)}
+                    disabled={quizGrading}
+                  >
+                    ✗ Save as Incorrect
+                  </button>
+                </div>
               </div>
             </div>
           </section>
@@ -6459,9 +6841,17 @@ export default function App() {
               <button className="ghost-button" type="button" onClick={() => navigateToStudentStats(activeClassId, route.studentId)}>
                 ← Back to {studentName}
               </button>
-              <span className="user-pill">{user.name}</span>
-              <span className="role-pill">{user.role}</span>
-              <button className="ghost-button" type="button" onClick={handleLogout}>Log out</button>
+              <div className="user-menu-anchor">
+                <button className="ghost-button user-menu-trigger" type="button" onClick={() => setUserMenuOpen((o) => !o)} aria-expanded={userMenuOpen} aria-haspopup="menu">
+                  {user.name} ▾
+                </button>
+                {userMenuOpen && (
+                  <div className="user-menu-dropdown" role="menu" onClick={() => setUserMenuOpen(false)}>
+                    <span className="user-menu-role">{user.role}</span>
+                    <button className="user-menu-item user-menu-item--danger" type="button" role="menuitem" onClick={handleLogout}>Log out</button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
 
@@ -6499,7 +6889,7 @@ export default function App() {
                     <code>{item.responseText}</code>
                   </pre>
                 ) : (
-                  <div style={{ background: "var(--surface-2)", borderRadius: "8px", padding: "0.9rem 1.1rem" }}>
+                  <div style={{ background: "var(--bg-raised)", borderRadius: "8px", padding: "0.9rem 1.1rem" }}>
                     <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{item.responseText}</p>
                   </div>
                 )}
@@ -6544,32 +6934,38 @@ export default function App() {
               <button className="ghost-button" type="button" onClick={() => navigateToStudentStats(activeClassId, route.studentId)}>
                 ← Back to Student
               </button>
-              <span className="user-pill">{user.name}</span>
-              <span className="role-pill">{user.role}</span>
-              <button className="ghost-button" type="button" onClick={handleLogout}>Log out</button>
+              <div className="user-menu-anchor">
+                <button className="ghost-button user-menu-trigger" type="button" onClick={() => setUserMenuOpen((o) => !o)} aria-expanded={userMenuOpen} aria-haspopup="menu">
+                  {user.name} ▾
+                </button>
+                {userMenuOpen && (
+                  <div className="user-menu-dropdown" role="menu" onClick={() => setUserMenuOpen(false)}>
+                    <span className="user-menu-role">{user.role}</span>
+                    <button className="user-menu-item user-menu-item--danger" type="button" role="menuitem" onClick={handleLogout}>Log out</button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
 
           <section className="class-stats-section panel-animate">
-            {studentAILogLoading && <p className="empty-state">Loading…</p>}
+            {studentAILogLoading && <SkeletonRows count={4} />}
             {!studentAILogLoading && interactions.length === 0 && (
-              <p className="empty-state">No interactions found.</p>
+              <EmptyState icon="💬" title="No interactions found" body="The student hasn't used the AI tutor on this item yet." />
             )}
             {!studentAILogLoading && interactions.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+              <div className="ai-log-section">
                 {interactions.map((ix, idx) => (
-                  <div key={ix._id || idx} style={{ borderBottom: "1px solid var(--border)", paddingBottom: "1.25rem" }}>
-                    <p className="stats-meta" style={{ marginBottom: "0.6rem" }}>
-                      {new Date(ix.createdAt).toLocaleString()}
-                    </p>
-                    <div style={{ background: "var(--surface-2)", borderRadius: "8px", padding: "0.75rem 1rem", marginBottom: "0.5rem" }}>
-                      <span style={{ display: "block", fontSize: "0.75rem", fontWeight: 700, marginBottom: "0.35rem", opacity: 0.6, textTransform: "uppercase", letterSpacing: "0.05em" }}>Student</span>
-                      <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{ix.userMessage || <em style={{ opacity: 0.5 }}>—</em>}</p>
+                  <div key={ix._id || idx} className="ai-log-entry">
+                    <p className="stats-meta ai-log-timestamp">{new Date(ix.createdAt).toLocaleString()}</p>
+                    <div className="ai-log-bubble">
+                      <span className="ai-log-bubble-role">Student</span>
+                      <p className="ai-log-bubble-text">{ix.userMessage || <em style={{ opacity: 0.5 }}>—</em>}</p>
                     </div>
                     {ix.aiResponse && (
-                      <div style={{ background: "var(--accent-soft, #eef2ff)", borderRadius: "8px", padding: "0.75rem 1rem" }}>
-                        <span style={{ display: "block", fontSize: "0.75rem", fontWeight: 700, marginBottom: "0.35rem", opacity: 0.6, textTransform: "uppercase", letterSpacing: "0.05em" }}>AI</span>
-                        <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{ix.aiResponse}</p>
+                      <div className="ai-log-bubble ai-log-bubble--ai">
+                        <span className="ai-log-bubble-role">AI</span>
+                        <p className="ai-log-bubble-text">{ix.aiResponse}</p>
                       </div>
                     )}
                   </div>
@@ -6601,13 +6997,21 @@ export default function App() {
               <button className="ghost-button" type="button" onClick={() => navigateToClass(activeClassId)}>
                 Back to Class
               </button>
-              <span className="user-pill">{user.name}</span>
-              <span className="role-pill">{user.role}</span>
-              <button className="ghost-button" type="button" onClick={handleLogout}>Log out</button>
+              <div className="user-menu-anchor">
+                <button className="ghost-button user-menu-trigger" type="button" onClick={() => setUserMenuOpen((o) => !o)} aria-expanded={userMenuOpen} aria-haspopup="menu">
+                  {user.name} ▾
+                </button>
+                {userMenuOpen && (
+                  <div className="user-menu-dropdown" role="menu" onClick={() => setUserMenuOpen(false)}>
+                    <span className="user-menu-role">{user.role}</span>
+                    <button className="user-menu-item user-menu-item--danger" type="button" role="menuitem" onClick={handleLogout}>Log out</button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
 
-          {studentStatsLoading && <p className="empty-state">Loading…</p>}
+          {studentStatsLoading && <SkeletonRows count={6} />}
 
           {!studentStatsLoading && sd && (
             <section className="class-stats-section panel-animate">
@@ -6720,9 +7124,9 @@ export default function App() {
           {/* AI Chat Log — grouped by item */}
           <section className="class-stats-section panel-animate" style={{ marginTop: "1.5rem" }}>
             <h3 style={{ marginBottom: "0.75rem" }}>AI Chat Log</h3>
-            {studentAILogLoading && <p className="empty-state">Loading…</p>}
+            {studentAILogLoading && <SkeletonRows count={3} />}
             {!studentAILogLoading && studentAILog !== null && studentAILog.length === 0 && (
-              <p className="empty-state">No AI interactions recorded for this student in this class.</p>
+              <EmptyState icon="🤖" title="No AI interactions yet" body="This student hasn't used the AI tutor in this class." />
             )}
             {!studentAILogLoading && studentAILog && studentAILog.length > 0 && (() => {
               const groups = new Map();
@@ -6765,7 +7169,7 @@ export default function App() {
     <PageShell className={`page-shell ${pageTransition}`}>
       <main className="workspace">
       {toast && (
-        <div className={`toast toast-${toast.type}`}>{toast.message}</div>
+        <div className={`toast toast-${toast.type}`} role="status" aria-live="polite" aria-atomic="true">{toast.message}</div>
       )}
       <header className="topbar">
         <div className="brand">
@@ -6793,22 +7197,24 @@ export default function App() {
               Delete class
             </button>
           )}
-          {isTeacher && (
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={() =>
-                setViewRole((prev) => (prev === "teacher" ? "student" : "teacher"))
-              }
-            >
-              Switch to {isTeacherView ? "Student" : "Teacher"}
+          <div className="user-menu-anchor">
+            <button className="ghost-button user-menu-trigger" type="button" onClick={() => setUserMenuOpen((o) => !o)} aria-expanded={userMenuOpen} aria-haspopup="menu">
+              {user.name} ▾
             </button>
-          )}
-          <span className="user-pill">{user.name}</span>
-          <span className="role-pill">{user.role}</span>
-          <button className="ghost-button" type="button" onClick={handleLogout}>
-            Log out
-          </button>
+            {userMenuOpen && (
+              <div className="user-menu-dropdown" role="menu" onClick={() => setUserMenuOpen(false)}>
+                <span className="user-menu-role">{user.role}</span>
+                {isTeacher && (
+                  <button className="user-menu-item" type="button" role="menuitem"
+                    onClick={() => setViewRole((prev) => (prev === "teacher" ? "student" : "teacher"))}
+                  >
+                    Switch to {isTeacherView ? "Student" : "Teacher"}
+                  </button>
+                )}
+                <button className="user-menu-item user-menu-item--danger" type="button" role="menuitem" onClick={handleLogout}>Log out</button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
       {navIndex >= 0 && (
@@ -6835,8 +7241,25 @@ export default function App() {
         </nav>
       )}
 
+      <nav className="workspace-tab-bar" aria-label="Workspace panels">
+        {[
+          { key: "lesson", label: "Lesson" },
+          { key: "editor", label: "Code" },
+          { key: "console", label: "Output" },
+        ].map(({ key, label }) => (
+          <button
+            key={key}
+            type="button"
+            className={`workspace-tab-btn${workspaceTab === key ? " active" : ""}`}
+            onClick={() => setWorkspaceTab(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
       <section className="workspace-grid">
-        <aside className="panel lesson-panel panel-animate">
+        <aside className={`panel lesson-panel panel-animate${workspaceTab !== "lesson" ? " workspace-panel-hidden" : ""}`}>
           <div className="class-summary">
             <p className="class-summary-title">Class</p>
             <strong>{activeClass ? activeClass.name : "Select a class"}</strong>
@@ -7050,7 +7473,7 @@ export default function App() {
           )}
         </aside>
 
-        <article className="panel editor-panel panel-animate">
+        <article className={`panel editor-panel panel-animate${workspaceTab !== "editor" ? " workspace-panel-hidden" : ""}`}>
           <div className="editor-header">
             <div className="file-pill">
               <span className="file-dot" />
@@ -7091,7 +7514,7 @@ export default function App() {
           </div>
         </article>
 
-        <aside className="panel output-panel panel-animate">
+        <aside className={`panel output-panel panel-animate${workspaceTab !== "console" ? " workspace-panel-hidden" : ""}`}>
           <div className="output-header">
             <h2>Console</h2>
             <span className="output-status">Ready</span>

@@ -253,6 +253,7 @@ function toQuizAttemptResponse(attempt) {
     isCorrect: typeof attempt.isCorrect === "boolean" ? attempt.isCorrect : null,
     score: typeof attempt.score === "number" ? attempt.score : null,
     feedback: attempt.feedback || "",
+    reasoning: attempt.reasoning || "",
     attempts: attempt.attempts || 0,
     submittedAt: attempt.submittedAt || null,
     gradedAt: attempt.gradedAt || null,
@@ -710,6 +711,7 @@ export async function submitQuizAttempt(req, res) {
   let isCorrect = null;
   let score = null;
   let feedback = "";
+  let reasoning = "";
   let gradedAt = null;
   const subtype = item.quizSubtype || "mcq";
 
@@ -739,6 +741,7 @@ export async function submitQuizAttempt(req, res) {
         isCorrect = grading.isCorrect;
         score = isCorrect ? (item.maxPoints || 1) : 0;
         feedback = grading.feedback;
+        reasoning = grading.reasoning || "";
         status = "graded";
         gradingStatus = "auto_graded";
         gradedAt = new Date();
@@ -760,6 +763,7 @@ export async function submitQuizAttempt(req, res) {
         isCorrect,
         score,
         feedback,
+        reasoning,
         submittedAt: new Date(),
         gradedAt,
       },
