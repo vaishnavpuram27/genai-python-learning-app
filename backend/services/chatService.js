@@ -11,6 +11,29 @@ function truncate(str, max) {
 }
 
 function buildSystemPrompt(role, ctx) {
+  // Teacher previewing the student AI — use student-facing persona with full responses
+  if (role === "teacher" && ctx.previewAsStudent) {
+    const personaName = ctx.aiPersonaName || "AI Assistant";
+    const toneInstructions = {
+      friendly:    "Be warm, approachable, and conversational.",
+      encouraging: "Be highly motivating — celebrate every small win and keep energy high.",
+      socratic:    "NEVER give direct answers. Only ask guiding questions that lead the student to the answer themselves.",
+      formal:      "Be precise and professional, but still age-appropriate and kind.",
+    }[ctx.aiTone || "friendly"] || "";
+    return [
+      `You are ${personaName}, a helpful coding tutor for middle school students (ages 11-14) who are just starting to learn Python.`,
+      "Your goal is to make coding feel fun, safe, and totally achievable.",
+      toneInstructions,
+      "Rules:",
+      "- Use extremely simple language. No jargon without a plain-English definition.",
+      "- Use fun, relatable analogies (video games, school, sports, food, animals).",
+      "- Keep explanations short and friendly. One concept at a time.",
+      "- NEVER generate any JSON blocks (no mcq-json, learning-json, practice-json, etc.).",
+      "- Give full, helpful answers — do not truncate.",
+      ctx.aiInstructions ? `Teacher's custom instructions: ${ctx.aiInstructions}` : "",
+    ].filter(Boolean).join("\n");
+  }
+
   if (role === "teacher") {
     return [
       "You are a teaching assistant for a Python programming course designed for middle school students (ages 11-14) who have NO prior experience with Python or programming.",
@@ -102,17 +125,43 @@ function buildSystemPrompt(role, ctx) {
       "- CRITICAL: Generate ONLY ONE lesson plan per response.",
       "- You may present a friendly human-readable summary above the lesson-plan-json block.",
       "",
+      "When the teacher asks to set, change, or remove the deadline or total marks/points for a quiz (e.g. 'set deadline to Friday', 'set max points to 10', 'remove the deadline', 'change total marks'), respond with a friendly confirmation AND always include a machine-readable block fenced with ```quiz-config-json. Include ONLY the fields being changed.",
+      "quiz-config-json schema: {\"maxPoints\": 10, \"deadline\": \"2026-04-30T23:59:00\"}",
+      "- To remove a deadline use: {\"deadline\": null}",
+      "- To set only marks (no deadline change): {\"maxPoints\": 5}",
+      "- To set only deadline (no marks change): {\"deadline\": \"ISO-datetime-string\"}",
+      "- CRITICAL: For relative dates ('tomorrow', 'next Friday', 'in 3 days'), compute the actual ISO date using today's date context provided in the system. Always use the teacher's stated time if given; otherwise default to 23:59:00.",
+      "- NEVER include quiz-config-json unless the teacher is explicitly asking to change settings (not when discussing or previewing).",
+      "",
+      ctx.inlineEdit
+        ? [
+            "INLINE TEXT EDIT MODE: The teacher has selected a specific passage of lesson text and wants you to suggest a replacement.",
+            `Action requested: ${ctx.editAction || "improve"}`,
+            "Rules for this mode:",
+            "- Return ONLY the replacement text — plain prose or a code block as appropriate. Nothing else.",
+            "- Do NOT include any JSON blocks (no learning-json, mcq-json, sa-json, practice-json, lesson-plan-json, quiz-config-json).",
+            "- Do NOT explain what you changed. Do NOT add a preamble like 'Here is the updated text:'. Just output the replacement.",
+            "- Match the length and tone of the original unless the action is to expand or shorten it.",
+            "- Keep language at middle-school level (ages 11-14), friendly and jargon-free.",
+          ].join("\n")
+        : "",
       ctx.className ? `Class: ${ctx.className}` : "",
+      ctx.aiInstructions
+        ? `TEACHER INSTRUCTIONS (set by you for this class — follow these when generating content):\n${ctx.aiInstructions}`
+        : "",
       ctx.lessonHeading
-        ? `Current Lesson: "${ctx.lessonHeading}"`
+        ? `Current Lesson: "${ctx.lessonHeading}"${ctx.lessonTopic ? ` (Topic: ${ctx.lessonTopic})` : ""}`
         : "",
       ctx.lessonBody
-        ? `Lesson Content:\n${truncate(ctx.lessonBody, MAX_BODY_CHARS)}`
+        ? `Existing Lesson Content (edit or improve THIS content when the teacher asks — do NOT invent unrelated content):\n${truncate(ctx.lessonBody, MAX_BODY_CHARS)}`
         : "",
       ctx.lessonInstructions
-        ? `Instructions: ${ctx.lessonInstructions}`
+        ? `Lesson Try-it Instructions: ${ctx.lessonInstructions}`
         : "",
       ctx.lessonQuestion ? `Lesson Question: ${ctx.lessonQuestion}` : "",
+      ctx.quizTitle
+        ? `Current Quiz: "${ctx.quizTitle}" — Max Points: ${ctx.quizCurrentMaxPoints ?? 0}${ctx.quizCurrentDeadline ? ` — Deadline: ${new Date(ctx.quizCurrentDeadline).toISOString()}` : " — No deadline set"}`
+        : "",
       ctx.codeStarter
         ? `Code Starter:\n\`\`\`python\n${ctx.codeStarter}\n\`\`\``
         : "",
@@ -152,9 +201,19 @@ function buildSystemPrompt(role, ctx) {
   }
 
   // Student — Socratic companion
+  const personaName = ctx.aiPersonaName || "Learning Buddy";
+  const toneInstructions = {
+    friendly:    "Be warm, approachable, and conversational.",
+    encouraging: "Be highly motivating — celebrate every small win and keep energy high.",
+    socratic:    "NEVER give direct answers. Only ask guiding questions that lead the student to the answer themselves.",
+    formal:      "Be precise and professional, but still age-appropriate and kind.",
+  }[ctx.aiTone || "friendly"] || "";
+
   return [
-    "You are a friendly, encouraging Learning Buddy for middle school students (ages 11-14) who are just starting to learn Python for the very first time.",
+    `You are ${personaName}, a helpful coding tutor for middle school students (ages 11-14) who are just starting to learn Python for the very first time.`,
     "Many of these students have never written a single line of code before and may find computers intimidating. Your job is to make coding feel fun, safe, and totally achievable.",
+    toneInstructions ? `TONE: ${toneInstructions}` : "",
+    ctx.aiInstructions ? `TEACHER INSTRUCTIONS (follow these exactly):\n${ctx.aiInstructions}` : "",
     "STRICT RULES:",
     "- NEVER give direct answers or paste complete solutions. Always guide, never tell.",
     "- Ask one simple question at a time to nudge the student forward.",
@@ -206,7 +265,19 @@ function buildSystemPrompt(role, ctx) {
       ? `Question to answer: ${ctx.lessonQuestion}`
       : "",
     ctx.hints ? `Available hints: ${ctx.hints}` : "",
+    ctx.aiTopicNotes ? `Teacher's notes for this topic (use as context, not to share directly): ${ctx.aiTopicNotes}` : "",
     "",
+    ctx.isStuck
+      ? [
+          "⚠️ STUCK MODE ACTIVATED: The student just clicked 'I'm stuck'. Switch from Socratic questioning to gentle scaffolded guidance.",
+          "1. Open with a warm, reassuring sentence ('This part IS tricky — you're not alone!').",
+          "2. Break the problem into 2-3 tiny numbered steps they can follow one at a time.",
+          "3. For each step: explain it in one plain sentence + a real-world analogy.",
+          "4. Give ONE very specific hint for the FIRST step only — not the answer.",
+          "5. End with 'Try just that first step — you've got this! 💪'",
+          "Keep the entire response under 6 sentences. Still NO full solution.",
+        ].join("\n")
+      : "",
     "Remember: you are talking to a 11-14 year old who is new to coding. Be their biggest cheerleader. Always reference their actual code. Guide them toward the answer with tiny hints — never give the solution away.",
   ]
     .filter(Boolean)
@@ -551,7 +622,7 @@ export async function* getChatCompletionStream(role, context, messages) {
  * Auto-grade a short answer response using the LLM.
  * Returns { isCorrect: boolean, score: number (0-1), feedback: string }
  */
-export async function gradeShortAnswer({ question, expectedAnswer, studentResponse }) {
+export async function gradeShortAnswer({ question, expectedAnswer, studentResponse, assessmentInstructions }) {
   const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
   const response = await openai.chat.completions.create({
@@ -564,10 +635,11 @@ export async function gradeShortAnswer({ question, expectedAnswer, studentRespon
           "Grade the student's response by comparing it to the expected answer.",
           "Be very lenient with phrasing and wording — focus only on whether the student shows understanding of the core concept, not perfect terminology.",
           "Feedback must be warm, positive, and age-appropriate — never discouraging. Always mention something they got right before noting what to improve.",
+          assessmentInstructions ? `TEACHER'S ASSESSMENT INSTRUCTIONS (follow these exactly when grading):\n${assessmentInstructions}` : "",
           "Respond ONLY with a JSON object, no other text:",
           '{"isCorrect": true/false, "score": 0.0-1.0, "feedback": "Brief, encouraging feedback in simple language a middle schooler understands", "reasoning": "2-sentence teacher-facing explanation of exactly why this score was given — what the student got right or wrong compared to the expected answer"}',
           "score should be 1.0 for fully correct, 0.5 for partially correct, 0.0 for incorrect.",
-        ].join("\n"),
+        ].filter(Boolean).join("\n"),
       },
       {
         role: "user",

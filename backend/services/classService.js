@@ -48,3 +48,17 @@ export async function deleteMembershipsByClassId(classId) {
 export async function deleteLessonsByClassId(classId) {
   return Lesson.deleteMany({ classId });
 }
+
+export async function getAiConfig(classId) {
+  const classroom = await Classroom.findById(classId).select("aiConfig").lean();
+  return classroom?.aiConfig || {};
+}
+
+export async function updateAiConfig(classId, updates) {
+  const classroom = await Classroom.findByIdAndUpdate(
+    classId,
+    { $set: { aiConfig: updates } },
+    { new: true, runValidators: true }
+  ).lean();
+  return classroom?.aiConfig || {};
+}

@@ -5,6 +5,7 @@ import lessonRoutes from "./lessonRoutes.js";
 import healthRoutes from "./healthRoutes.js";
 import progressRoutes from "./progressRoutes.js";
 import chatRoutes from "./chatRoutes.js";
+import hubRoutes from "./hubRoutes.js";
 
 const router = Router();
 
@@ -14,5 +15,6 @@ router.use("/lessons", lessonRoutes);
 router.use("/health", healthRoutes);
 router.use("/progress", progressRoutes);
 router.use("/chat", chatRoutes);
+router.use("/hub", hubRoutes);
 
 export default router;

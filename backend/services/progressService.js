@@ -9,9 +9,11 @@ export async function getProgress(userId, lessonId) {
 }
 
 export async function upsertProgress(userId, lessonId, update) {
+  // Strip undefined values so we don't accidentally $set fields to undefined
+  const $set = Object.fromEntries(Object.entries(update).filter(([, v]) => v !== undefined));
   return LessonProgress.findOneAndUpdate(
     { userId, lessonId },
-    update,
+    { $set },
     {
       new: true,
       upsert: true,

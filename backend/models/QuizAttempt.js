@@ -30,8 +30,11 @@ const quizAttemptSchema = new mongoose.Schema(
       default: "pending",
     },
     isCorrect: { type: Boolean, default: null },
-    score: { type: Number, default: null },
+    score: { type: Number, default: null },        // final score shown to student
+    aiScore: { type: Number, default: null },       // original AI-assigned score (preserved on override)
+    teacherScore: { type: Number, default: null },  // teacher override score (null = not overridden)
     feedback: { type: String, default: "", trim: true },
+    teacherFeedback: { type: String, default: "", trim: true }, // teacher override note
     reasoning: { type: String, default: "", trim: true },
     attempts: { type: Number, default: 0 },
     submittedAt: { type: Date, default: null },

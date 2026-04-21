@@ -5,7 +5,7 @@ import {
   validateStudentResponse,
   rateContent,
 } from "../services/chatService.js";
-import { getMembership } from "../services/classService.js";
+import { getMembership, getAiConfig } from "../services/classService.js";
 import { getLessonById } from "../services/lessonService.js";
 import { logInteraction, updateInteractionResponse } from "../services/aiInteractionService.js";
 import { sendError, sendSuccess } from "../utils/responses.js";
@@ -49,6 +49,9 @@ export async function streamChat(req, res) {
   /* ── Build server-side context ── */
   const serverCtx = {};
   const { role } = req.user;
+  if (clientCtx.previewAsStudent === true && role === "teacher") {
+    serverCtx.previewAsStudent = true;
+  }
 
   // Verify class membership if classId provided
   if (clientCtx.classId) {
@@ -57,6 +60,28 @@ export async function streamChat(req, res) {
       return sendError(res, "Forbidden", 403, "FORBIDDEN");
     }
     serverCtx.className = clientCtx.className || "";
+
+    // Load teacher's AI config for this class
+    try {
+      const aiConfig = await getAiConfig(clientCtx.classId);
+      if (aiConfig) {
+        serverCtx.aiEnabled        = aiConfig.enabled ?? true;
+        serverCtx.aiPersonaName    = aiConfig.personaName || "";
+        serverCtx.aiTone           = aiConfig.tone || "friendly";
+        serverCtx.aiInstructions   = aiConfig.instructions || "";
+        serverCtx.aiAssessment     = aiConfig.assessmentInstructions || "";
+        // Inject topic-specific notes if the student is on a lesson in a known topic
+        if (clientCtx.topicId && aiConfig.topicNotes?.length) {
+          const tn = aiConfig.topicNotes.find(n => n.topicId === clientCtx.topicId);
+          if (tn?.notes) serverCtx.aiTopicNotes = tn.notes;
+        }
+      }
+    } catch { /* proceed without AI config */ }
+
+    // Block student chat if teacher disabled AI
+    if (role === "student" && serverCtx.aiEnabled === false) {
+      return sendError(res, "AI assistant is disabled for this class", 403, "AI_DISABLED");
+    }
   }
 
   // Fetch lesson data from DB (trusted source)
@@ -82,6 +107,8 @@ export async function streamChat(req, res) {
   if (clientCtx.studentAnswer) serverCtx.studentAnswer = clientCtx.studentAnswer;
   if (clientCtx.topics) serverCtx.topics = clientCtx.topics;
   if (Array.isArray(clientCtx.classTopics)) serverCtx.classTopics = clientCtx.classTopics;
+  if (clientCtx.previewAsStudent === true && req.user.role === "teacher") serverCtx.previewAsStudent = true;
+  if (clientCtx.isStuck) serverCtx.isStuck = true;
 
   /* ── Log AI interaction for students ── */
   let interactionId = null;

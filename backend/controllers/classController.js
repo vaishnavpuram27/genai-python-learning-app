@@ -9,6 +9,8 @@ import {
   getMembership,
   listClassesForUser,
   listMemberships,
+  getAiConfig,
+  updateAiConfig,
 } from "../services/classService.js";
 import User from "../models/User.js";
 import { listLessons } from "../services/lessonService.js";
@@ -252,7 +254,10 @@ function toQuizAttemptResponse(attempt) {
     gradingStatus: attempt.gradingStatus,
     isCorrect: typeof attempt.isCorrect === "boolean" ? attempt.isCorrect : null,
     score: typeof attempt.score === "number" ? attempt.score : null,
+    aiScore: typeof attempt.aiScore === "number" ? attempt.aiScore : null,
+    teacherScore: typeof attempt.teacherScore === "number" ? attempt.teacherScore : null,
     feedback: attempt.feedback || "",
+    teacherFeedback: attempt.teacherFeedback || "",
     reasoning: attempt.reasoning || "",
     attempts: attempt.attempts || 0,
     submittedAt: attempt.submittedAt || null,
@@ -710,6 +715,7 @@ export async function submitQuizAttempt(req, res) {
   let gradingStatus = "pending";
   let isCorrect = null;
   let score = null;
+  let aiScore = null;
   let feedback = "";
   let reasoning = "";
   let gradedAt = null;
@@ -733,13 +739,16 @@ export async function submitQuizAttempt(req, res) {
     const expected = `${item.quizAnswer || ""}`.trim();
     if (expected) {
       try {
+        const aiCfg = await getAiConfig(classroom._id).catch(() => ({}));
         const grading = await gradeShortAnswer({
           question: item.quizQuestion || "",
           expectedAnswer: expected,
           studentResponse: responseText,
+          assessmentInstructions: aiCfg?.assessmentInstructions || "",
         });
         isCorrect = grading.isCorrect;
         score = isCorrect ? (item.maxPoints || 1) : 0;
+        aiScore = score;
         feedback = grading.feedback;
         reasoning = grading.reasoning || "";
         status = "graded";
@@ -762,6 +771,7 @@ export async function submitQuizAttempt(req, res) {
         gradingStatus,
         isCorrect,
         score,
+        aiScore,
         feedback,
         reasoning,
         submittedAt: new Date(),
@@ -828,7 +838,11 @@ export async function gradeQuizAttempt(req, res) {
     gradingStatus: "manual_graded",
     isCorrect: payload.isCorrect,
     score,
+    teacherScore: score,
+    // Preserve aiScore if it was already set; set it now from current score if not
+    ...(attempt.aiScore == null && attempt.score != null ? { aiScore: attempt.score } : {}),
     feedback,
+    teacherFeedback: feedback,
     gradedAt: new Date(),
   });
 
@@ -871,12 +885,18 @@ export async function getStudentStats(req, res) {
       feedback: a?.feedback || null,
       submittedAt: a?.submittedAt || null,
       attempts: a?.attempts || 0,
+      score: typeof a?.score === "number" ? a.score : null,
+      maxPoints: item.maxPoints ?? 0,
+      gradingStatus: a?.gradingStatus || null,
     };
   });
 
+  const totalPoints = gradableItems.reduce((sum, i) => sum + (i.maxPoints ?? 0), 0);
+  const earnedPoints = items.reduce((sum, i) => sum + (typeof i.score === "number" ? i.score : 0), 0);
+
   return sendSuccess(res, {
     student: { id: req.params.studentId, name: student?.name || "Unknown" },
-    summary: { attempted, correct, total: gradableItems.length },
+    summary: { attempted, correct, total: gradableItems.length, totalPoints, earnedPoints },
     items,
   });
 }
@@ -1107,14 +1127,18 @@ export async function getMyClassProgress(req, res) {
   const membership = await getMembership(req.user.id, classroom._id);
   if (!membership || membership.role !== "student") return sendError(res, "Forbidden", 403, "FORBIDDEN");
 
-  const [allItems, myAttempts] = await Promise.all([
+  const [allItems, myAttempts, myProgress] = await Promise.all([
     listTopicItemsByClass(classroom._id),
     listQuizAttemptsByUserInClass(req.user.id, classroom._id),
+    listProgressByUser(req.user.id),
   ]);
 
   const attemptedItemIds = new Set(myAttempts.map((a) => a.itemId.toString()));
   const correctItemIds = new Set(myAttempts.filter((a) => a.isCorrect === true).map((a) => a.itemId.toString()));
   const attemptByItemId = new Map(myAttempts.map((a) => [a.itemId.toString(), a]));
+  const completedLearningIds = new Set(
+    myProgress.filter((p) => p.status === "completed").map((p) => p.lessonId.toString())
+  );
 
   const gradedItems = allItems.filter((i) => i.type === "quiz" || i.type === "practice");
   const attemptedCount = gradedItems.filter((i) => attemptedItemIds.has(i._id.toString())).length;
@@ -1125,13 +1149,17 @@ export async function getMyClassProgress(req, res) {
 
   const items = allItems.map((i) => {
     const attempt = attemptByItemId.get(i._id.toString());
+    const attempted =
+      i.type === "learning"
+        ? completedLearningIds.has(i._id.toString())
+        : attemptedItemIds.has(i._id.toString());
     return {
       id: i._id.toString(),
       topicId: i.topicId.toString(),
       type: i.type,
       title: i.title,
       maxPoints: i.maxPoints ?? 0,
-      attempted: i.type !== "learning" ? attemptedItemIds.has(i._id.toString()) : null,
+      attempted,
       score: attempt ? (typeof attempt.score === "number" ? attempt.score : null) : null,
       isCorrect: attempt ? (typeof attempt.isCorrect === "boolean" ? attempt.isCorrect : null) : null,
     };
@@ -1238,4 +1266,38 @@ export async function getStudentAIInteractions(req, res) {
 
   const interactions = await listByStudentInClass(req.params.studentId, classroom._id);
   return sendSuccess(res, { interactions });
+}
+
+export async function getAiConfigHandler(req, res) {
+  try {
+    const classroom = await getClassById(req.params.id);
+    if (!classroom) return sendError(res, "Class not found", 404, "NOT_FOUND");
+    const membership = await getMembership(req.user.id, classroom._id);
+    if (!membership) return sendError(res, "Forbidden", 403, "FORBIDDEN");
+    const aiConfig = await getAiConfig(req.params.id);
+    return sendSuccess(res, { aiConfig });
+  } catch (err) {
+    return sendError(res, err.message || "Failed to get AI config", 500);
+  }
+}
+
+export async function updateAiConfigHandler(req, res) {
+  try {
+    const classroom = await getClassById(req.params.id);
+    if (!classroom) return sendError(res, "Class not found", 404, "NOT_FOUND");
+    const membership = await getMembership(req.user.id, classroom._id);
+    if (!membership || membership.role !== "teacher") return sendError(res, "Forbidden", 403, "FORBIDDEN");
+    const { enabled, personaName, tone, instructions, assessmentInstructions, topicNotes } = req.body;
+    const updates = {};
+    if (enabled !== undefined) updates.enabled = enabled;
+    if (personaName !== undefined) updates.personaName = personaName;
+    if (tone !== undefined) updates.tone = tone;
+    if (instructions !== undefined) updates.instructions = instructions;
+    if (assessmentInstructions !== undefined) updates.assessmentInstructions = assessmentInstructions;
+    if (topicNotes !== undefined) updates.topicNotes = topicNotes;
+    const aiConfig = await updateAiConfig(req.params.id, updates);
+    return sendSuccess(res, { aiConfig });
+  } catch (err) {
+    return sendError(res, err.message || "Failed to update AI config", 500);
+  }
 }

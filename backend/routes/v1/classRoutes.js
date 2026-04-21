@@ -29,6 +29,8 @@ import {
   submitQuizAttempt,
   gradeQuizAttempt,
   getStudentAIInteractions,
+  getAiConfigHandler,
+  updateAiConfigHandler,
 } from "../../controllers/classController.js";
 
 const router = Router();
@@ -123,6 +125,8 @@ router.put(
   validateObjectId("attemptId"),
   gradeQuizAttempt
 );
+router.get("/:id/ai-config", validateObjectId("id"), getAiConfigHandler);
+router.put("/:id/ai-config", validateObjectId("id"), updateAiConfigHandler);
 router.post("/", createClassHandler);
 router.post("/join", joinClass);
 router.delete("/:id", validateObjectId("id"), deleteClassHandler);
