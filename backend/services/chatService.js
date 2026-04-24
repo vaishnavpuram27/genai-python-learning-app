@@ -265,6 +265,8 @@ function buildSystemPrompt(role, ctx) {
       ? `Question to answer: ${ctx.lessonQuestion}`
       : "",
     ctx.hints ? `Available hints: ${ctx.hints}` : "",
+    ctx.quizQuestion ? `Quiz question the student is stuck on: "${ctx.quizQuestion}"` : "",
+    ctx.quizOptions ? `Quiz answer options: ${ctx.quizOptions}` : "",
     ctx.aiTopicNotes ? `Teacher's notes for this topic (use as context, not to share directly): ${ctx.aiTopicNotes}` : "",
     "",
     ctx.isStuck

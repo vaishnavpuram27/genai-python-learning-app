@@ -183,6 +183,13 @@ export default function ChatBot({
     if (text.toLowerCase().includes("i'm stuck") || text.toLowerCase().includes("im stuck")) {
       context.isStuck = true;
     }
+    // Include quiz context for students on quiz page (so AI can reference the question)
+    if (route.page === "quiz" && quizMeta) {
+      context.quizQuestion = quizMeta.quizQuestion || quizMeta.title || "";
+      if (Array.isArray(quizMeta.options) && quizMeta.options.length > 0) {
+        context.quizOptions = quizMeta.options.map((o, i) => `${String.fromCharCode(65 + i)}) ${o.text}`).join(", ");
+      }
+    }
     try {
       const res = await fetch(API_BASE + "/chat", {
         method: "POST",
@@ -621,6 +628,8 @@ export default function ChatBot({
 
       {/* Full-window chat */}
       {chatOpen && (
+        <>
+        <div className="cb-backdrop" onClick={() => setChatOpen(false)} />
         <div className="cb-overlay">
           {/* Sidebar */}
           <aside className="cb-sidebar">
@@ -774,6 +783,7 @@ export default function ChatBot({
             <p className="cb-input-notice">AI makes mistakes. Double-check important information.</p>
           </div>
         </div>
+        </>
       )}
     </>
   );

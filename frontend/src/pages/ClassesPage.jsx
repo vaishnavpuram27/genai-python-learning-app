@@ -32,13 +32,15 @@ export default function ClassesPage({ handleLogout, chatBot }) {
       <PageShell className={`page-shell ${pageTransition}`}>
         <main className="student-classes-page">
 
-          {/* Header — same structure as student side */}
-          <header className="student-classes-header">
-            <div className="student-classes-greeting">
-              <span className="student-greeting-wave">👋</span>
-              <div>
-                <h1>Hey, {user.name.split(" ")[0]}!</h1>
-                <p className="student-greeting-sub">Teacher Workspace · My Classes</p>
+          {/* Hero header */}
+          <header className="teacher-home-hero">
+            <div className="teacher-home-hero-text">
+              <div className="student-classes-greeting">
+                <span className="student-greeting-wave">👋</span>
+                <div>
+                  <h1 className="teacher-home-hero-title">Hey, {user.name.split(" ")[0]}!</h1>
+                  <p className="teacher-home-hero-sub">Teacher Workspace · My Classes</p>
+                </div>
               </div>
             </div>
             <div className="student-header-actions" style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
@@ -71,6 +73,26 @@ export default function ClassesPage({ handleLogout, chatBot }) {
           {classError && <p className="auth-error">{classError}</p>}
           {classNotice && <p className="auth-notice">{classNotice}</p>}
 
+          {/* Stats strip — shown when classes exist */}
+          {classes.length > 0 && (
+            <div className="teacher-home-stats">
+              <div className="teacher-home-stat">
+                <span className="teacher-home-stat-num">{classes.length}</span>
+                <span className="teacher-home-stat-label">Class{classes.length !== 1 ? "es" : ""}</span>
+              </div>
+              <div className="teacher-home-stat-divider" />
+              <div className="teacher-home-stat">
+                <span className="teacher-home-stat-icon">🤖</span>
+                <span className="teacher-home-stat-label">AI-powered lessons</span>
+              </div>
+              <div className="teacher-home-stat-divider" />
+              <div className="teacher-home-stat">
+                <span className="teacher-home-stat-icon">📊</span>
+                <span className="teacher-home-stat-label">Live student stats</span>
+              </div>
+            </div>
+          )}
+
           {/* Class cards */}
           <div className="tp-class-grid">
             {classes.map((item, idx) => {
@@ -91,8 +113,37 @@ export default function ClassesPage({ handleLogout, chatBot }) {
                 </div>
               );
             })}
-            {!classes.length && <EmptyState icon="🏫" title="No classes yet" body="Create your first class to start building lessons." />}
           </div>
+
+          {/* Getting started guide — shown when no classes */}
+          {!classes.length && (
+            <div className="teacher-home-onboard">
+              <p className="teacher-home-onboard-title">Get started in 3 steps</p>
+              <div className="teacher-home-onboard-steps">
+                <div className="teacher-home-onboard-step">
+                  <span className="teacher-home-onboard-num">1</span>
+                  <div>
+                    <strong>Create a class</strong>
+                    <p>Type a class name above and hit Create. Share the join code with students.</p>
+                  </div>
+                </div>
+                <div className="teacher-home-onboard-step">
+                  <span className="teacher-home-onboard-num">2</span>
+                  <div>
+                    <strong>Add topics &amp; lessons</strong>
+                    <p>Inside your class, build topics and fill them with lessons, quizzes, and practice exercises.</p>
+                  </div>
+                </div>
+                <div className="teacher-home-onboard-step">
+                  <span className="teacher-home-onboard-num">3</span>
+                  <div>
+                    <strong>Let students learn</strong>
+                    <p>Students work through content at their own pace — you see their progress in real time.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
         </main>
         {chatBot}

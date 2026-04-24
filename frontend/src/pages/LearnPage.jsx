@@ -166,7 +166,8 @@ export default function LearnPage({
           {learningMeta && (
             <LearningViewer meta={learningMeta} isTeacher={false} activeClassId={activeClassId}
               authHeaders={authHeaders} API_BASE={API_BASE}
-              onSaved={(updated) => setLearningMeta(prev => ({ ...prev, ...updated }))} setToast={setToast} />
+              onSaved={(updated) => setLearningMeta(prev => ({ ...prev, ...updated }))} setToast={setToast}
+              onExplain={onStuck} />
           )}
           {learningMeta && onStuck && (
             <button className="stuck-btn" type="button"

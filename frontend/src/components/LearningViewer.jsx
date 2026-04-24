@@ -5,8 +5,9 @@ import rehypeHighlight from "rehype-highlight";
 import { parseBodyToCells, serializeCellsToBody } from "../utils/parsers";
 import { NotebookEditor, MD_COMPONENTS } from "./NotebookEditor";
 import SelectionPopup from "./SelectionPopup";
+import StudentExplainPopup from "./StudentExplainPopup";
 
-export default function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE, onSaved, setToast, onAskAI, previewItem, onAcceptPreview, onClearPreview }) {
+export default function LearningViewer({ meta, isTeacher, activeClassId, authHeaders, API_BASE, onSaved, setToast, onAskAI, previewItem, onAcceptPreview, onClearPreview, onExplain }) {
   const hasContent = !!(meta.practiceBody || meta.practiceCodeStarter);
   const hints = Array.isArray(meta.practiceHints) ? meta.practiceHints : [];
   const hasExercise = !!(meta.practiceInstructions);
@@ -313,7 +314,7 @@ export default function LearningViewer({ meta, isTeacher, activeClassId, authHea
                 );
                 return isTeacher
                   ? <SelectionPopup onReplaceText={handleInlineReplace} classId={activeClassId} itemId={meta.id}>{bodyContent}</SelectionPopup>
-                  : bodyContent;
+                  : <StudentExplainPopup onExplain={onExplain}>{bodyContent}</StudentExplainPopup>;
               })()}
 
               {hasExercise && (
