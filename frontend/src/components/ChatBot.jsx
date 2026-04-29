@@ -60,6 +60,7 @@ export default function ChatBot({
   const chatMessagesEndRef = useRef(null);
   const [aiPersonaName, setAiPersonaName] = useState("");
   const processedStuckTsRef = useRef(null);
+  const chatInputRef = useRef(null);
 
   const isTeacherView = user?.role === "teacher";
 
@@ -186,8 +187,8 @@ export default function ChatBot({
     // Include quiz context for students on quiz page (so AI can reference the question)
     if (route.page === "quiz" && quizMeta) {
       context.quizQuestion = quizMeta.quizQuestion || quizMeta.title || "";
-      if (Array.isArray(quizMeta.options) && quizMeta.options.length > 0) {
-        context.quizOptions = quizMeta.options.map((o, i) => `${String.fromCharCode(65 + i)}) ${o.text}`).join(", ");
+      if (Array.isArray(quizMeta.quizOptions) && quizMeta.quizOptions.length > 0) {
+        context.quizOptions = quizMeta.quizOptions.map((o, i) => `${String.fromCharCode(65 + i)}) ${o}`).join(", ");
       }
     }
     try {
@@ -233,6 +234,7 @@ export default function ChatBot({
     const updatedMessages = [...chatMessages, userMessage];
     setChatMessages(updatedMessages);
     setChatInput("");
+    if (chatInputRef.current) { chatInputRef.current.style.height = "auto"; chatInputRef.current.style.overflowY = "hidden"; }
     setChatLoading(true);
     setChatError("");
 
@@ -771,9 +773,19 @@ export default function ChatBot({
 
             {/* Input bar */}
             <div className="cb-input-bar">
-              <input type="text" className="cb-input" value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") sendChatMessage(); }}
+              <textarea className="cb-input" ref={chatInputRef} value={chatInput}
+                rows={1}
+                onChange={(e) => {
+                  setChatInput(e.target.value);
+                  const el = e.target;
+                  el.style.height = "auto";
+                  const newHeight = Math.min(el.scrollHeight, 180);
+                  el.style.height = newHeight + "px";
+                  el.style.overflowY = el.scrollHeight > 180 ? "auto" : "hidden";
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChatMessage(); }
+                }}
                 placeholder={isTeacherView ? "Generate a quiz, lesson, or ask anything…" : "Ask for a hint, explanation, or help…"}
                 disabled={chatLoading} />
               <button type="button" className="cb-send-btn" onClick={sendChatMessage} disabled={chatLoading || !chatInput.trim()}>

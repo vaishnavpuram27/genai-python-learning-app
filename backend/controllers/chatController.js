@@ -109,6 +109,8 @@ export async function streamChat(req, res) {
   if (Array.isArray(clientCtx.classTopics)) serverCtx.classTopics = clientCtx.classTopics;
   if (clientCtx.previewAsStudent === true && req.user.role === "teacher") serverCtx.previewAsStudent = true;
   if (clientCtx.isStuck) serverCtx.isStuck = true;
+  if (clientCtx.quizQuestion) serverCtx.quizQuestion = clientCtx.quizQuestion;
+  if (clientCtx.quizOptions) serverCtx.quizOptions = clientCtx.quizOptions;
 
   /* ── Log AI interaction for students ── */
   let interactionId = null;

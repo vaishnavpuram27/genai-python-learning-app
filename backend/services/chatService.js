@@ -265,22 +265,32 @@ function buildSystemPrompt(role, ctx) {
       ? `Question to answer: ${ctx.lessonQuestion}`
       : "",
     ctx.hints ? `Available hints: ${ctx.hints}` : "",
-    ctx.quizQuestion ? `Quiz question the student is stuck on: "${ctx.quizQuestion}"` : "",
-    ctx.quizOptions ? `Quiz answer options: ${ctx.quizOptions}` : "",
+    ctx.quizQuestion
+      ? [
+          `⚠️ QUIZ CONTEXT: The student is stuck on a quiz question. They did NOT write any code — any code shown is PART OF THE QUESTION written by the teacher.`,
+          `NEVER say "nice job writing that" or praise the student for code they didn't write.`,
+          `Quiz question: "${ctx.quizQuestion}"`,
+        ].join("\n")
+      : "",
+    ctx.quizOptions ? `Answer choices: ${ctx.quizOptions}` : "",
     ctx.aiTopicNotes ? `Teacher's notes for this topic (use as context, not to share directly): ${ctx.aiTopicNotes}` : "",
     "",
     ctx.isStuck
       ? [
-          "⚠️ STUCK MODE ACTIVATED: The student just clicked 'I'm stuck'. Switch from Socratic questioning to gentle scaffolded guidance.",
+          "⚠️ STUCK MODE ACTIVATED: The student just clicked 'I'm stuck'.",
+          ctx.quizQuestion
+            ? "They are confused about a quiz question — NOT about code they wrote. Help them understand what the question is ASKING, then guide them toward which answer might be correct without revealing it."
+            : "Switch from Socratic questioning to gentle scaffolded guidance.",
           "1. Open with a warm, reassuring sentence ('This part IS tricky — you're not alone!').",
-          "2. Break the problem into 2-3 tiny numbered steps they can follow one at a time.",
-          "3. For each step: explain it in one plain sentence + a real-world analogy.",
-          "4. Give ONE very specific hint for the FIRST step only — not the answer.",
-          "5. End with 'Try just that first step — you've got this! 💪'",
-          "Keep the entire response under 6 sentences. Still NO full solution.",
+          "2. Explain what the question or concept is asking in plain, simple language.",
+          "3. Use a real-world analogy (video games, school, food, animals).",
+          "4. Ask ONE guiding question to help them think about the right answer — never reveal it.",
+          "Keep the entire response under 5 sentences.",
         ].join("\n")
       : "",
-    "Remember: you are talking to a 11-14 year old who is new to coding. Be their biggest cheerleader. Always reference their actual code. Guide them toward the answer with tiny hints — never give the solution away.",
+    ctx.quizQuestion
+      ? "Remember: you are talking to a 11-14 year old who is confused about a quiz question. Be warm and encouraging. Help them understand the concept — never give away the answer directly."
+      : "Remember: you are talking to a 11-14 year old who is new to coding. Be their biggest cheerleader. Always reference their actual code. Guide them toward the answer with tiny hints — never give the solution away.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -347,24 +357,35 @@ async function runCurriculumAnalyst(ctx, teacherMessage) {
  */
 function buildAnalystPrompt(ctx) {
   return [
-    "You are an expert Python tutor analyzing a middle school student's code.",
-    "The student is a complete beginner (ages 11-14). Your job is to produce an INTERNAL technical analysis for another AI to simplify.",
-    "Identify ALL of the following:",
-    "1. What the student is trying to accomplish",
-    "2. What they got right (even if small)",
-    "3. The ONE most important issue or next step",
-    "4. A Socratic question (do not answer it yourself) that nudges them toward the fix",
-    "5. Whether they asked about something off-topic (outside their current exercise)",
-    "Be specific and reference actual line numbers or variable names from their code.",
+    "You are an expert Python tutor helping a middle school student (ages 11-14).",
+    "Your job is to produce an INTERNAL analysis for another AI to simplify into a kid-friendly reply.",
+    ctx.quizQuestion
+      ? "⚠️ QUIZ MODE: The student did NOT write any code. Any code shown is part of the quiz question written by the teacher. Do NOT praise the student for the code. Focus on what concept the question is testing and how to guide the student toward the right answer without revealing it."
+      : [
+          "Identify ALL of the following:",
+          "1. What the student is trying to accomplish",
+          "2. What they got right (even if small)",
+          "3. The ONE most important issue or next step",
+          "4. A Socratic question (do not answer it yourself) that nudges them toward the fix",
+          "5. Whether they asked about something off-topic (outside their current exercise)",
+          "Be specific and reference actual line numbers or variable names from their code.",
+        ].join("\n"),
     "This output is for another AI, NOT for the student — be technical.",
     "",
-    ctx.studentCode
-      ? `Student's code:\n\`\`\`python\n${truncate(ctx.studentCode, MAX_CODE_CHARS)}\n\`\`\``
-      : "Student has not written any code yet.",
-    ctx.codeOutput ? `Code output/error:\n${ctx.codeOutput}` : "",
-    ctx.lessonHeading ? `Current exercise: "${ctx.lessonHeading}"` : "",
-    ctx.lessonInstructions ? `Task: ${ctx.lessonInstructions}` : "",
-    ctx.lessonBody ? `Lesson context:\n${truncate(ctx.lessonBody, 600)}` : "",
+    ctx.quizQuestion
+      ? [
+          `⚠️ QUIZ CONTEXT: The student is stuck on a quiz question (NOT a coding exercise). They did NOT write any code.`,
+          `Quiz question: "${ctx.quizQuestion}"`,
+          ctx.quizOptions ? `Answer choices: ${ctx.quizOptions}` : "",
+          `Your analysis should focus on helping the student understand what the question is ASKING and which concept it tests. Do NOT ask for more context — you already have the full question.`,
+        ].filter(Boolean).join("\n")
+      : ctx.studentCode
+        ? `Student's code:\n\`\`\`python\n${truncate(ctx.studentCode, MAX_CODE_CHARS)}\n\`\`\``
+        : "Student has not written any code yet.",
+    !ctx.quizQuestion && ctx.codeOutput ? `Code output/error:\n${ctx.codeOutput}` : "",
+    !ctx.quizQuestion && ctx.lessonHeading ? `Current exercise: "${ctx.lessonHeading}"` : "",
+    !ctx.quizQuestion && ctx.lessonInstructions ? `Task: ${ctx.lessonInstructions}` : "",
+    !ctx.quizQuestion && ctx.lessonBody ? `Lesson context:\n${truncate(ctx.lessonBody, 600)}` : "",
     ctx.hints ? `Available hints: ${ctx.hints}` : "",
   ]
     .filter(Boolean)
@@ -375,7 +396,34 @@ function buildAnalystPrompt(ctx) {
  * Agent 2: K-12 simplifier — turns the analyst's output into a very short,
  * kid-friendly message and streams it to the student.
  */
+function labelQuizCodeBlocks(text) {
+  // Replace any code fences with a clear teacher-label so the AI doesn't think the student wrote it
+  return text.replace(/```[\w]*\n([\s\S]*?)```/g, "\n[Teacher's example code — NOT written by the student]:\n$1");
+}
+
 function buildSimplifierPrompt(ctx) {
+  if (ctx.quizQuestion) {
+    const labeledQuestion = labelQuizCodeBlocks(ctx.quizQuestion);
+    return [
+      "You are a friendly quiz helper for a middle school student (age 11-14) learning Python.",
+      "YOUR ONLY GOAL: Guide the student to understand which answer is correct. Stop as soon as they show understanding.",
+      "",
+      "DECISION TREE — follow in order for every reply:",
+      "1. If the student has just explained why their chosen answer is correct (even roughly, in their own words) → reply ONLY: '✅ You've got it! Go ahead and submit your answer now.' No extra questions.",
+      "2. If the student has already received '✅ You've got it!' → reply ONLY: 'You already know this — go hit Submit!'",
+      "3. If the student picked an answer but hasn't explained why → ask ONLY: 'Why do you think that one fits?'",
+      "4. If the student hasn't picked an answer yet → explain the concept in plain English (max 2 sentences), then ask: 'So which answer choice fits that idea?'",
+      "",
+      "ALWAYS:",
+      "- MAXIMUM 65 words. Strictly follow the decision tree — do not add extra questions or facts beyond what the step requires.",
+      "- The student wrote NO code. Never say 'your code', 'your loop', 'you wrote', etc.",
+      "- Never echo answer-choice wording directly. Never reveal the correct answer.",
+      "",
+      `Quiz question: "${labeledQuestion}"`,
+      ctx.quizOptions ? `Answer choices: ${ctx.quizOptions}` : "",
+    ].filter(Boolean).join("\n");
+  }
+
   return [
     "You turn a technical coding analysis into a SHORT, friendly message for a middle school student (age 11-14) who is new to Python.",
     "STRICT RULES — follow every one:",
@@ -388,9 +436,7 @@ function buildSimplifierPrompt(ctx) {
     "- NEVER suggest any topic or task outside their current exercise.",
     "- If the analysis says the student asked about something off-topic, warmly redirect them back to their exercise in ≤2 sentences.",
     ctx.lessonHeading ? `The student's current exercise is: "${ctx.lessonHeading}"` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 /**
@@ -402,12 +448,31 @@ async function* getStudentChatStream(ctx, messages) {
   const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
   const trimmed = messages.slice(-MAX_MESSAGES);
 
+  // Quiz mode: skip the code-analyst; only keep last 4 messages to avoid old-context drift
+  if (ctx.quizQuestion) {
+    const quizMessages = trimmed.slice(-4);
+    const stream = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: buildSimplifierPrompt(ctx) },
+        ...quizMessages,
+      ],
+      max_tokens: 130,
+      temperature: 0.5,
+      stream: true,
+    });
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content;
+      if (text) yield text;
+    }
+    return;
+  }
+
   // Agent 1: technical analysis (non-streaming, internal)
   const analystResult = await openai.chat.completions.create({
     model: "gpt-4.1-mini",
     messages: [
       { role: "system", content: buildAnalystPrompt(ctx) },
-      // Include conversation history so Agent 1 sees what's been said
       ...trimmed,
     ],
     max_tokens: 350,

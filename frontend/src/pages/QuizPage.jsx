@@ -346,7 +346,7 @@ export default function QuizPage({
                     {quizSubmitting ? "Submitting…" : "Submit Answer 🚀"}
                   </button>
                   <button className="qp-stuck-btn" type="button"
-                    onClick={() => onStuck && onStuck(`I'm stuck on this quiz question: "${quizMeta.quizQuestion}"`)}>
+                    onClick={() => onStuck && onStuck(`I'm stuck on this quiz question. Can you help me understand it?`)}>
                     😕 I'm stuck
                   </button>
                 </div>
@@ -377,7 +377,7 @@ export default function QuizPage({
                       Try Again 🔄
                     </button>
                     <button className="qp-stuck-btn" type="button"
-                      onClick={() => onStuck && onStuck(`I'm stuck on this quiz question: "${quizMeta.quizQuestion}". I answered "${quizResponse}" but it was wrong.`)}>
+                      onClick={() => onStuck && onStuck(`I'm stuck — I tried answering but got it wrong. Can you help me understand this question?`)}>
                       😕 I'm stuck
                     </button>
                   </div>

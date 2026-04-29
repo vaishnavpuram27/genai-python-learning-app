@@ -36,7 +36,7 @@ export default function StudentExplainPopup({ children, onExplain }) {
 
   function handleExplain() {
     if (!popup) return;
-    onExplain?.(`Can you explain this to me in simple terms: "${popup.text}"`);
+    onExplain?.(`I'm reading my lesson and I don't understand this part. Can you explain it to me differently? The lesson says: "${popup.text}"`);
     setPopup(null);
     window.getSelection()?.removeAllRanges();
   }
